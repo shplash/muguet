@@ -125,11 +125,23 @@ fn main() -> Result<()> {
         config.target("aarch64-apple-ios").map_err(anyhow::Error::from)?;
         unsafe { config.cranelift_flag_enable("has_lse") };
         let engine = Engine::new(&config).map_err(anyhow::Error::from)?;
-        let patched = patch::patch(&std::fs::read(wasm)?, mp::COMMANDS)?;
+        let wasm_bytes = std::fs::read(wasm)?;
+        let patched = if patch::is_patched(&wasm_bytes) { wasm_bytes } else { patch::patch(&wasm_bytes, mp::COMMANDS)? };
         std::fs::write(out, engine.precompile_module(&patched).map_err(anyhow::Error::from)?)?;
         eprintln!("[host] precompiled {wasm} -> {out}");
         return Ok(());
     }
+    #[cfg(feature = "jit")]
+    if argv.get(1).map(String::as_str) == Some("--patch") {
+        let (wasm, out) = (argv.get(2).context("--patch <wasm> <out>")?, argv.get(3).context("--patch <wasm> <out>")?);
+        std::fs::write(out, patch::patch(&std::fs::read(wasm)?, mp::COMMANDS)?)?;
+        return Ok(());
+    }
+    #[cfg(feature = "jit")]
+    let launcher_out = {
+        use std::os::fd::AsFd;
+        std::io::stdout().as_fd().try_clone_to_owned().map(std::fs::File::from)
+    };
     let startup = match config::setup() {
         Ok(s) => s,
         Err(e) => {
@@ -138,6 +150,15 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+    #[cfg(feature = "jit")]
+    if argv.get(1).map(String::as_str) == Some("--compile") {
+        if !code_cache(&startup)?.exists() {
+            use std::io::Write;
+            writeln!(launcher_out?, "compiling")?;
+            load_module(&Engine::new(&engine_config()).map_err(anyhow::Error::from)?, &startup)?;
+        }
+        return Ok(());
+    }
     #[cfg(not(target_os = "ios"))]
     let rt = Some(make_runtime(&startup)?);
     #[cfg(target_os = "ios")]
@@ -270,24 +291,34 @@ impl CustomCodeMemory for SignedCode {
 }
 
 #[cfg(feature = "jit")]
-fn load_module(engine: &Engine, startup: &config::Startup) -> Result<Module> {
-    let wasm_path = startup.wasm_path.clone();
-    let meta = std::fs::metadata(&wasm_path).with_context(|| format!("{}", wasm_path.display()))?;
+fn code_cache(startup: &config::Startup) -> Result<std::path::PathBuf> {
+    let wasm_path = &startup.wasm_path;
+    let meta = std::fs::metadata(wasm_path).with_context(|| format!("{}", wasm_path.display()))?;
     let stamp = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
 
     let mp_key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (patch::VERSION, mp::COMMANDS).hash(&mut h);
+        (patch::VERSION, mp::COMMANDS, host::MISSING_TEXT).hash(&mut h);
         h.finish() as u32
     };
-    let cache = startup.cache_dir.join(format!("game-{}-{stamp}-{mp_key:08x}.cwasm", meta.len()));
+    Ok(startup.cache_dir.join(format!("game-{}-{stamp}-{mp_key:08x}.cwasm", meta.len())))
+}
+
+#[cfg(feature = "jit")]
+fn load_module(engine: &Engine, startup: &config::Startup) -> Result<Module> {
+    let wasm_path = startup.wasm_path.clone();
+    let cache = code_cache(startup)?;
 
     if let Some(m) = cache.exists().then(|| unsafe { Module::deserialize_file(engine, &cache) }.ok()).flatten() {
         return Ok(m);
     }
     eprintln!("[host] compiling {} to native code (one-time)…", wasm_path.display());
     let m = compile_patched(engine, &wasm_path)?;
+    for e in std::fs::read_dir(&startup.cache_dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with("game-") && name.ends_with(".cwasm") { let _ = std::fs::remove_file(e.path()); }
+    }
     std::fs::write(&cache, m.serialize()?)?;
     Ok(m)
 }

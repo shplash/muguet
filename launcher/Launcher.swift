@@ -64,6 +64,40 @@ final class Importer: ObservableObject {
     }
 }
 
+final class Compiler: ObservableObject {
+    @Published var started: Date?
+    @Published var error: String?
+    var expected: Double {
+        let s = UserDefaults.standard.double(forKey: "compileSeconds")
+        return s > 0 ? s : 60
+    }
+
+    func run(then done: @escaping () -> Void) {
+        error = nil
+        let p = Process()
+        p.executableURL = gameBinary
+        p.arguments = ["--compile"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        out.fileHandleForReading.readabilityHandler = { h in
+            guard let text = String(data: h.availableData, encoding: .utf8), text.contains("compiling") else { return }
+            DispatchQueue.main.async { self.started = Date() }
+        }
+        p.terminationHandler = { p in
+            out.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                if let s = self.started, p.terminationStatus == 0 {
+                    UserDefaults.standard.set(Date().timeIntervalSince(s), forKey: "compileSeconds")
+                }
+                self.started = nil
+                if p.terminationStatus == 0 { done() } else { self.error = "Compiling the game failed (see ~/Library/Logs/Muguet.log)" }
+            }
+        }
+        do { try p.run() } catch { self.error = "Could not compile the game: \(error.localizedDescription)" }
+    }
+}
+
 final class Settings: ObservableObject {
     @Published var mode = 2
     @Published var scale = 0.5
@@ -115,6 +149,7 @@ final class Settings: ObservableObject {
 struct LauncherView: View {
     @StateObject private var s = Settings()
     @StateObject private var importer = Importer()
+    @StateObject private var compiler = Compiler()
     @State private var error: String?
 
     var body: some View {
@@ -122,6 +157,8 @@ struct LauncherView: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().scaledToFit().frame(height: 110)
             if !importer.ready || importer.progress != nil {
                 importView
+            } else if let started = compiler.started {
+                compileView(started)
             } else {
                 settingsView
             }
@@ -144,6 +181,18 @@ struct LauncherView: View {
                     .buttonStyle(.borderedProminent)
             }
             if let e = importer.error { Text(e).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
+        }
+    }
+
+    func compileView(_ started: Date) -> some View {
+        TimelineView(.periodic(from: started, by: 0.5)) { t in
+            let elapsed = t.date.timeIntervalSince(started)
+            VStack(spacing: 12) {
+                ProgressView(value: min(elapsed / compiler.expected, 0.95))
+                Text("Compiling the game for this Mac… \(Int(elapsed)) s").font(.callout).monospacedDigit()
+                Text("This should not take more than 60 seconds.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -194,7 +243,7 @@ struct LauncherView: View {
             .formStyle(.grouped)
             .scrollDisabled(true)
             .fixedSize(horizontal: false, vertical: true)
-            if let error { Text(error).foregroundStyle(.red).font(.callout) }
+            if let error = error ?? compiler.error { Text(error).foregroundStyle(.red).font(.callout) }
             Button(action: play) {
                 Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: .infinity)
             }
@@ -216,7 +265,11 @@ struct LauncherView: View {
             return
         }
         do { try s.save() } catch { self.error = "Could not save settings: \(error.localizedDescription)"; return }
+        error = nil
+        compiler.run(then: launch)
+    }
 
+    func launch() {
         let game = gameBinary.path
         var argv: [UnsafeMutablePointer<CChar>?] = [strdup(game), nil]
         execv(game, &argv)

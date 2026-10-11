@@ -3,9 +3,11 @@
 
 use crate::{read_bytes, read_cstr, read_u64, write_bytes, write_u64};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use wasmtime::{SharedMemory, Val};
@@ -19,6 +21,8 @@ const ENOSYS: i64 = 52;
 const ENOTDIR: i64 = 54;
 const ENOTEMPTY: i64 = 55;
 const ENOTTY: i64 = 59;
+const EIO: i64 = 29;
+const EFAULT: i64 = 21;
 
 const O_ACCMODE: i64 = 3;
 const O_CREAT: i64 = 64;
@@ -114,6 +118,32 @@ fn read_dir_names(host: &Path) -> Vec<(String, u8)> {
         }
     }
     v
+}
+
+fn statfs_bytes(host: &Path) -> Result<[u8; 120], i64> {
+    let path = CString::new(host.as_os_str().as_bytes()).map_err(|_| EINVAL)?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(match error.kind() {
+            std::io::ErrorKind::NotFound => ENOENT,
+            std::io::ErrorKind::PermissionDenied => 2,
+            _ => EIO,
+        });
+    }
+    let stats = unsafe { stats.assume_init() };
+    // The memory64 guest uses 8-byte statfs fields, not the host's struct layout.
+    let mut bytes = [0u8; 120];
+    for (offset, value) in [
+        (8, stats.f_bsize as u64), (16, stats.f_blocks as u64),
+        (24, stats.f_bfree as u64), (32, stats.f_bavail as u64),
+        (40, stats.f_files as u64), (48, stats.f_ffree as u64),
+        (56, stats.f_fsid as u64), (64, stats.f_namemax as u64),
+        (72, stats.f_frsize as u64), (80, stats.f_flag as u64),
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    Ok(bytes)
 }
 
 pub fn handle(name: &str, mem: &SharedMemory, p: &[Val], results: &mut [Val]) -> bool {
@@ -233,7 +263,14 @@ pub fn handle(name: &str, mem: &SharedMemory, p: &[Val], results: &mut [Val]) ->
         }
         "__syscall_fcntl64" => if a(0) <= 2 || fs.fds.contains_key(&a(0)) { 0 } else { -EBADF },
         "__syscall_ioctl" => -ENOTTY,
-        "__syscall_statfs64" => { write_bytes(mem, a(2) as u64, &statfs()); 0 }
+        "__syscall_statfs64" => (|| {
+            if a(1) != 120 { return Err(-EINVAL); }
+            let guest = guest_abs(&fs, AT_FDCWD, &read_cstr(mem, a(0) as u64)).map_err(|e| -e)?;
+            let host = host_path(&fs, &guest);
+            let bytes = statfs_bytes(host.ancestors().find(|p| p.exists()).unwrap_or(&host)).map_err(|e| -e)?;
+            if !write_bytes(mem, a(2) as u64, &bytes) { return Err(-EFAULT); }
+            Ok(0)
+        })().unwrap_or_else(|e| e),
 
         "__syscall_socket" | "__syscall_connect" | "__syscall_accept4" | "__syscall_sendto"
         | "__syscall_recvfrom" | "__syscall_setsockopt" | "__syscall_getsockopt"
@@ -325,14 +362,71 @@ pub fn httpfs_manifest(mem: &SharedMemory, p: &[Val], results: &mut [Val]) {
     ok_i(results, r);
 }
 
-fn statfs() -> [u8; 88] {
-    let mut b = [0u8; 88];
-    let blocks: u64 = 16 << 20;
-    b[8..12].copy_from_slice(&4096u32.to_le_bytes());
-    b[72..76].copy_from_slice(&4096u32.to_le_bytes());
-    for (off, v) in [(16, blocks), (24, blocks), (32, blocks), (40, 1 << 20), (48, 1 << 20)] {
-        b[off..off + 8].copy_from_slice(&(v as u64).to_le_bytes());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statfs_reports_real_available_space_in_guest_layout() {
+        let host = std::env::temp_dir();
+        let bytes = statfs_bytes(&host).unwrap();
+        let field = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        let path = CString::new(host.as_os_str().as_bytes()).unwrap();
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        assert_eq!(unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) }, 0);
+        let stats = unsafe { stats.assume_init() };
+        assert_eq!(field(8), stats.f_bsize as u64);
+        assert_eq!(field(16), stats.f_blocks as u64);
+        assert!(field(8) > 0);
+        assert!(field(32) <= field(24));
+        assert!(field(24) <= field(16));
+        assert_eq!(field(72), stats.f_frsize as u64);
+        // A zero-filled response previously made this writable disk look full.
+        assert!(field(32) * field(72) > 1024 * 1024);
+        assert_eq!(statfs_bytes(&host.join(format!("muguet-missing-{}", std::process::id()))), Err(ENOENT));
     }
-    b[64..68].copy_from_slice(&255u32.to_le_bytes());
-    b
+
+    #[test]
+    fn guest_save_survives_close_and_reopen() {
+        let root = std::env::temp_dir().join(format!("muguet-save-test-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        std::env::set_var("MUGUET_FSROOT", &root);
+        let mut config = wasmtime::Config::new();
+        config.shared_memory(true);
+        let engine = wasmtime::Engine::new(&config).unwrap();
+        let mem = SharedMemory::new(&engine, wasmtime::MemoryType::shared(1, 1)).unwrap();
+        let call = |name: &str, args: &[i64]| {
+            let params: Vec<_> = args.iter().map(|v| Val::I64(*v)).collect();
+            let mut result = [Val::I32(-999)];
+            assert!(handle(name, &mem, &params, &mut result));
+            result[0].unwrap_i32() as i64
+        };
+        write_bytes(&mem, 32, b"/tmp/SGTA50000\0");
+        write_bytes(&mem, 64, b"/tmp/SGTA50001\0");
+        let fd = call("__syscall_openat", &[AT_FDCWD, 32, 2 | O_CREAT | O_TRUNC, 0]);
+        assert!(fd >= 3);
+        let payload = b"save round trip";
+        write_bytes(&mem, 512, payload);
+        write_u64(&mem, 256, 512);
+        write_u64(&mem, 264, payload.len() as u64);
+        assert_eq!(call("fd_write", &[fd, 256, 1, 320]), 0);
+        assert_eq!(read_u64(&mem, 320), Some(payload.len() as u64));
+        assert_eq!(call("fd_close", &[fd]), 0);
+        assert_eq!(call("__syscall_renameat", &[AT_FDCWD, 32, AT_FDCWD, 64]), 0);
+        // Read from disk independently, then reopen through the guest interface.
+        assert_eq!(fs::read(root.join("tmp/SGTA50001")).unwrap(), payload);
+        let fd = call("__syscall_openat", &[AT_FDCWD, 64, 0, 0]);
+        assert!(fd >= 3);
+        write_bytes(&mem, 512, &[0; 15]);
+        assert_eq!(call("fd_read", &[fd, 256, 1, 320]), 0);
+        assert_eq!(crate::read_bytes(&mem, 512, payload.len() as u64), payload);
+        assert_eq!(call("fd_close", &[fd]), 0);
+        write_bytes(&mem, 96, b"/tmp\0");
+        write_bytes(&mem, 1024, &[0xaa; 128]);
+        assert_eq!(call("__syscall_statfs64", &[96, 120, 1024]), 0);
+        assert!(read_u64(&mem, 1056).unwrap() > 0);
+        assert_eq!(crate::read_bytes(&mem, 1144, 8), [0xaa; 8]);
+        assert_eq!(call("__syscall_statfs64", &[96, 88, 1024]), -EINVAL);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

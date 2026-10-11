@@ -28,7 +28,15 @@ For iOS, also :
 - a device on iOS 15 or later, ideally 8 GB of RAM
 
 ## Building
-macOS :
+The easy way, paste this in Terminal :
+```
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/c22dev/muguet/main/build.sh)"
+```
+It downloads Muguet into `/tmp/muguet`, installs what's missing (Homebrew, Rust...), then asks whether you want the Mac or the iOS version and walks you through the rest. The `.app` / `.ipa` end up in `~/Downloads/muguetOutput`. Already have the repo ? Double-click `build.command`, or run `./build.sh`
+
+You need Xcode 26 or later from the App Store. To install on your iPhone / iPad, sign in to Xcode with your Apple ID (Settings > Accounts), a free one works
+
+By hand, macOS :
 ```
 ./make-app.sh
 ```
@@ -49,8 +57,12 @@ One player hosts from the launcher (or runs `muguet-server` on any machine), the
 
 ## Limitations
 - iOS needs the increased memory limit entitlement
-- Minimap doesn't show
 - Story missions are single player only
 
+## Credits
+- [Kagander](https://github.com/Kagander) for fixing the minimap
+- [inj-src](https://github.com/inj-src) for decoding bc textures on all cores
+- [Dbhardwaj99](https://github.com/Dbhardwaj99) for reporting real free disk space
+- [dre4moff](https://github.com/dre4moff) for releasing controller input when the app loses focus
 
 Contributions are welcome !

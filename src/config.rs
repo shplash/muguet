@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 #[cfg_attr(target_os = "ios", allow(dead_code))]
+#[derive(Clone)]
 pub struct Startup {
     pub wasm_path: PathBuf,
     pub cache_dir: PathBuf,
@@ -35,7 +36,9 @@ fn support_dir() -> PathBuf {
 }
 
 pub fn game_dir() -> PathBuf {
-    support_dir().join("game")
+    let dir = support_dir().join("game");
+    let old = dir.join("gamedat");
+    if !dir.join("data").exists() && old.join("data/manifest.json").exists() { old } else { dir }
 }
 
 pub fn game_ready() -> bool {

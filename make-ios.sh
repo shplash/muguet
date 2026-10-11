@@ -40,6 +40,21 @@ if [ -n "$ZIP" ]; then
       unzip -p "$ZIP" "$ENTRY" > target/ios-game/game.wasm ;;
     *) cp "$ZIP" target/ios-game/game.wasm ;;
   esac
+  ./target/release/muguet --patch target/ios-game/game.wasm target/ios-game/game.patched.wasm
+  mv target/ios-game/game.patched.wasm target/ios-game/game.wasm
+  if command -v wasm-opt >/dev/null; then
+    SUM="$(shasum -a 256 target/ios-game/game.wasm | cut -c1-16)"
+    if [ ! -f "target/ios-game/game.opt-$SUM.wasm" ]; then
+      echo "optimizing the game's code with wasm-opt -O3 (a few minutes, once)…"
+      rm -f target/ios-game/game.opt-*.wasm
+      wasm-opt target/ios-game/game.wasm -O3 -g --enable-memory64 --enable-threads --enable-bulk-memory --enable-mutable-globals \
+        --enable-sign-ext --enable-nontrapping-float-to-int --enable-simd --enable-multivalue --enable-reference-types --enable-multimemory \
+        -o "target/ios-game/game.opt-$SUM.wasm.tmp" && mv "target/ios-game/game.opt-$SUM.wasm.tmp" "target/ios-game/game.opt-$SUM.wasm"
+    fi
+    [ -f "target/ios-game/game.opt-$SUM.wasm" ] && cp "target/ios-game/game.opt-$SUM.wasm" target/ios-game/game.wasm
+  else
+    echo "wasm-opt not found (brew install binaryen): building without the extra optimization"
+  fi
   ./target/release/muguet --precompile-ios target/ios-game/game.wasm target/ios-game/game.cwasm
   rm target/ios-game/game.wasm
   export MUGUET_GAME_CODE="$PWD/target/ios-game/game.cwasm"

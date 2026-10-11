@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static FOCUSED: AtomicBool = AtomicBool::new(true);
 
 pub static IN_VEHICLE: AtomicBool = AtomicBool::new(false);
 
@@ -41,9 +42,10 @@ fn down(b: &GCControllerButtonInput) -> bool {
 }
 
 pub fn poll() -> bool {
+    if !FOCUSED.load(Ordering::Relaxed) { release_all(); return false; }
     let Some(gp) = gamepad() else {
         if ACTIVE.swap(false, Ordering::Relaxed) {
-            if let Some(st) = STATE.lock().unwrap().take() { release(st); }
+            release_all();
             eprintln!("[pad] controller disconnected");
         }
         return false;
@@ -57,6 +59,7 @@ pub fn poll() -> bool {
     st.last = Instant::now();
 
     let in_car = IN_VEHICLE.load(Ordering::Relaxed);
+    HORN_PAD.store(false, Ordering::Relaxed);
     let mut keys: HashSet<&'static str> = HashSet::new();
     let mut buttons = 0u8;
     unsafe {
@@ -130,4 +133,9 @@ fn release(st: State) {
     for k in st.held { input::key(k, false, false, None, false); }
     if st.buttons & 1 != 0 { input::button(0, false); }
     if st.buttons & 2 != 0 { input::button(2, false); }
+}
+
+pub fn release_all() {
+    HORN_PAD.store(false, Ordering::Relaxed);
+    if let Some(st) = STATE.lock().unwrap().take() { release(st); }
 }

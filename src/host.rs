@@ -6,7 +6,7 @@ use crate::{
     write_u64, HostState, RT,
 };
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use wasmtime::{Caller, SharedMemory, Val};
@@ -65,6 +65,26 @@ fn export_call(caller: &mut Caller<'_, HostState>, name: &str, args: &[Val]) -> 
     Ok(results)
 }
 
+// labels the scripts print that no loaded text block has (the copy in arm1.gxt2 only loads during that mission)
+pub const MISSING_TEXT: &[(&str, &str)] = &[
+    ("HELP_DCK", "~s~Hold ~INPUT_VEH_DUCK~ to duck when sitting inside a vehicle."),
+];
+
+fn missing_text(caller: &mut Caller<'_, HostState>, hash: u32) -> Result<u64> {
+    static TEXT: LazyLock<Mutex<HashMap<u32, u64>>> = LazyLock::new(Default::default);
+    let mut text = TEXT.lock().unwrap();
+    if let Some(&p) = text.get(&hash) {
+        return Ok(p);
+    }
+    let Some((_, s)) = MISSING_TEXT.iter().find(|(l, _)| crate::proto::joaat(l) == hash) else { return Ok(0) };
+    let p = match export_call(caller, "muguet:malloc", &[Val::I64(s.len() as i64 + 1)])?.first() { Some(Val::I64(p)) => *p as u64, Some(Val::I32(p)) => *p as u32 as u64, _ => 0 };
+    if p != 0 {
+        write_bytes(&RT.get().expect("runtime").mem, p, &[s.as_bytes(), &[0]].concat());
+        text.insert(hash, p);
+    }
+    Ok(p)
+}
+
 pub fn mailbox_await(mem: &SharedMemory, pthread_ptr: u64) {
     write_u32(mem, pthread_ptr + 204, 1);
 }
@@ -103,6 +123,7 @@ pub fn call(mut caller: Caller<'_, HostState>, idx: usize, params: &[Val], resul
         "muguet_script" => crate::mp::script_tick(&mut caller, int(params, 0) as u64, int(params, 1) as u64)?,
         "muguet_explosion" => crate::mp::explosion(int(params, 0) as u64),
         "muguet_timewarp" => set_int(results, crate::mp::time_warp(int(params, 0))),
+        "muguet_text" => set_int(results, missing_text(&mut caller, int(params, 0) as u32)? as i64),
         "__pthread_create_js" => {
             let r = spawn_pthread(int(params, 0) as u64, int(params, 2) as u64, int(params, 3) as u64);
             set_int(results, r as i64);

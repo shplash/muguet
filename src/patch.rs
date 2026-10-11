@@ -13,18 +13,21 @@ enum Arg {
     TlsBase,
 
     Local1Replaced,
+
+    MissingText,
 }
 
 const HOOKS: &[(&str, &str, &[Arg])] = &[
     ("muguet_script", "GtaThread::Update(int)", &[Arg::Local0, Arg::TlsBase]),
     ("muguet_explosion", "CExplosionManager::AddExplosion(CExplosionManager::CExplosionArgs&, CProjectile*, bool)", &[Arg::Local0]),
     ("muguet_timewarp", "CTimeWarper::SetTargetTimeWarp(TW_Dir)", &[Arg::Local1Replaced]),
+    ("muguet_text", "CTextFile::GetInternal(unsigned int)", &[Arg::MissingText]),
 ];
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 fn returns(args: &[Arg]) -> bool {
-    args.contains(&Arg::Local1Replaced)
+    args.contains(&Arg::Local1Replaced) || args.contains(&Arg::MissingText)
 }
 
 struct Patcher {
@@ -83,17 +86,29 @@ impl Reencode for Patcher {
         };
         let mut f = self.new_function_with_parsed_locals(&func)?;
         use wasm_encoder::Instruction as I;
-        for arg in HOOKS[hook].2 {
-            match arg {
-                Arg::Local0 => f.instruction(&I::LocalGet(0)),
-                Arg::TlsBase => f.instruction(&I::GlobalGet(self.tls_global)),
-                Arg::Local1Replaced => f.instruction(&I::LocalGet(1)).instruction(&I::I64ExtendI32U),
-            };
-        }
-        f.instruction(&I::Call(self.imported_funcs + hook as u32));
-        if returns(HOOKS[hook].2) {
-            f.instruction(&I::I32WrapI64);
-            f.instruction(&I::LocalSet(1));
+        let call = I::Call(self.imported_funcs + hook as u32);
+        if HOOKS[hook].2 == [Arg::MissingText] {
+            // only call out for the listed hashes: text lookups are hot
+            for (label, _) in crate::host::MISSING_TEXT {
+                f.instruction(&I::LocalGet(0)).instruction(&I::I32Const(crate::proto::joaat(label) as i32)).instruction(&I::I32Eq);
+                f.instruction(&I::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&I::LocalGet(0)).instruction(&I::I64ExtendI32U).instruction(&call).instruction(&I::Return);
+                f.instruction(&I::End);
+            }
+        } else {
+            for arg in HOOKS[hook].2 {
+                match arg {
+                    Arg::Local0 => f.instruction(&I::LocalGet(0)),
+                    Arg::TlsBase => f.instruction(&I::GlobalGet(self.tls_global)),
+                    Arg::Local1Replaced => f.instruction(&I::LocalGet(1)).instruction(&I::I64ExtendI32U),
+                    Arg::MissingText => unreachable!(),
+                };
+            }
+            f.instruction(&call);
+            if returns(HOOKS[hook].2) {
+                f.instruction(&I::I32WrapI64);
+                f.instruction(&I::LocalSet(1));
+            }
         }
         let mut reader = func.get_operators_reader()?;
         while !reader.eof() {
@@ -102,6 +117,13 @@ impl Reencode for Patcher {
         code.function(&f);
         Ok(())
     }
+}
+
+pub fn is_patched(wasm: &[u8]) -> bool {
+    Parser::new(0).parse_all(wasm).any(|p| match p {
+        Ok(Payload::ImportSection(s)) => s.into_imports().any(|i| i.is_ok_and(|i| i.name == HOOKS[0].0)),
+        _ => false,
+    })
 }
 
 pub fn patch(wasm: &[u8], wanted: &[(&str, &str)]) -> Result<Vec<u8>> {
@@ -150,6 +172,9 @@ pub fn patch(wasm: &[u8], wanted: &[(&str, &str)]) -> Result<Vec<u8>> {
         targets.insert(f, k);
     }
     let mut exports = Vec::new();
+    if let Some(&malloc) = by_name.get("emscripten_builtin_malloc") {
+        exports.push(("muguet:malloc".to_string(), malloc));
+    }
     for (export, func) in wanted {
         match by_name.get(*func) {
             Some(&i) => exports.push((format!("mp:{export}"), i)),

@@ -184,25 +184,20 @@ impl App {
         self.started = true;
         let (w, h) = backbuffer_size(&window);
         input::set_size(w, h);
-        let rt = match self.rt.clone() {
-            Some(rt) => rt,
-            None => match crate::make_runtime(&self.startup) {
-                Ok(rt) => {
-                    self.rt = Some(rt.clone());
-                    rt
-                }
-                Err(e) => {
-                    eprintln!("[host] {e:#}");
-                    return;
-                }
-            },
-        };
+        let (rt, startup) = (self.rt.clone(), self.startup.clone());
         let mut args = self.args.clone();
         args.extend(["-wgpu".to_string(), format!("-width={w}"), format!("-height={h}")]);
         std::thread::Builder::new()
             .name("engine-main".into())
             .stack_size(64 << 20)
             .spawn(move || {
+                let rt = match rt.map(Ok).unwrap_or_else(|| crate::make_runtime(&startup)) {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("[host] {e:#}");
+                        return;
+                    }
+                };
                 if let Err(e) = crate::run_engine(&rt, args) {
                     eprintln!("[host] engine failed: {e:?}");
                 }

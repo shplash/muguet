@@ -69,6 +69,14 @@ final class Importer: ObservableObject {
     @Published var ready = muguet_game_ready()
     @Published var progress: Double?
     @Published var error: String?
+    @Published var local: [URL] = []
+
+    func scan() {
+        let docs = configURL.deletingLastPathComponent()
+        let files = (try? FileManager.default.contentsOfDirectory(at: docs, includingPropertiesForKeys: [.isRegularFileKey], options: .skipsHiddenFiles)) ?? []
+        local = files.filter { $0.pathExtension.lowercased() == "zip" && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
 
     func run(_ url: URL) {
         error = nil
@@ -95,6 +103,7 @@ struct LauncherView: View {
     @ObservedObject private var importer = Importer.shared
     @State private var error: String?
     @State private var picking = false
+    @Environment(\.scenePhase) private var phase
     let play: () -> Void
 
     var body: some View {
@@ -168,6 +177,8 @@ struct LauncherView: View {
         .fileImporter(isPresented: $picking, allowedContentTypes: [.zip]) { result in
             if case .success(let url) = result { importer.run(url) }
         }
+        .onAppear { importer.scan() }
+        .onChange(of: phase) { p in if p == .active { importer.scan() } }
     }
 
     @ViewBuilder var importView: some View {
@@ -179,6 +190,11 @@ struct LauncherView: View {
                 Button("Import game data .zip") { picking = true }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
+                ForEach(importer.local, id: \.self) { url in
+                    Button("Import \(url.lastPathComponent)") { importer.run(url) }
+                }
+                Text("If the picker doesn't work, move the zip to Files → On My iPhone → Muguet and it will show up here.")
+                    .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }
             if let e = importer.error { Text(e).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
         }
@@ -189,11 +205,15 @@ struct LauncherView: View {
             Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220)
         }
         .controlSize(.large)
+        #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             button.buttonStyle(.glassProminent)
         } else {
             button.buttonStyle(.borderedProminent)
         }
+        #else
+        button.buttonStyle(.borderedProminent)
+        #endif
     }
 
     func start() {

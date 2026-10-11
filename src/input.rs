@@ -63,6 +63,8 @@ pub fn size() -> (i32, i32) {
 }
 
 pub fn set_focus(focused: bool) {
+    crate::pad::FOCUSED.store(focused, Ordering::Relaxed);
+    if !focused { crate::pad::release_all(); }
     if let Some(f) = word(FOCUS) { f.store(focused as i32, Ordering::SeqCst); }
     if !focused { release_all(); }
 }

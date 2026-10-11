@@ -75,6 +75,7 @@ const BUTTONS: &[Spec] = &[
 
 const STICK_RADIUS: f64 = 58.0;
 const KNOB_RADIUS: f64 = 26.0;
+const SPRINT_REACH: f64 = 1.35;
 
 const LOOK_GAIN: f64 = 3.0;
 const WHEEL_DEADZONE: f64 = 10.0;
@@ -341,11 +342,14 @@ impl Overlay {
             } else {
                 if ny < -0.35 { keys.insert("KeyW"); }
                 if ny > 0.35 { keys.insert("KeyS"); }
-                if len > STICK_RADIUS * 0.95 { keys.insert("ShiftLeft"); }
             }
+            let sprint = !self.in_car && len > STICK_RADIUS * SPRINT_REACH;
+            if sprint { keys.insert("ShiftLeft"); }
+            set_alpha_bg(&self.stick_knob, if sprint { 0.65 } else { 0.3 });
             move_to(&self.stick_base, o);
             move_to(&self.stick_knob, (o.0 + dx, o.1 + dy));
         } else {
+            set_alpha_bg(&self.stick_knob, 0.3);
             move_to(&self.stick_base, self.stick_home);
             move_to(&self.stick_knob, self.stick_home);
         }
