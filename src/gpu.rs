@@ -21,6 +21,7 @@ const BIND_UAV: u32 = 0x80;
 const RING_CHUNK: u64 = 8 << 20;
 const UBO_WINDOW: u64 = 65536;
 const FRAME_SLOTS: usize = 3;
+const PIPELINE_WAIT: Duration = Duration::from_millis(8);
 const ZERO_VB_SIZE: u64 = 4096;
 const OCCLUSION_CAPACITY: u32 = 2048;
 const OCCLUSION_VISIBLE_COUNT: u64 = 65536;
@@ -796,6 +797,7 @@ pub struct Gpu {
     pipe_pending: HashMap<u64, (Vec<i64>, Vec<VbReq>, String)>,
     pending_skips: u64,
     pending_skips0: u64,
+    pipe_wait_left: Duration,
     compute: HashMap<String, Option<(ComputePipeline, BindGroupLayout, u64, Rc<Program>)>>,
     bind_groups: HashMap<Vec<u64>, (BindGroup, u64)>,
     ubo_slots: Vec<Vec<Chunk>>,
@@ -948,7 +950,7 @@ impl Gpu {
             Some(job_tx)
         };
         Ok(Gpu {
-            instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0,
+            instance: instance.clone(), pending_clears: HashMap::new(), clears_folded: 0, pipe_jobs, pipe_results, pipe_pending: HashMap::new(), pending_skips: 0, pending_skips0: 0, pipe_wait_left: PIPELINE_WAIT,
             base, mem, ring, device, queue, adapter, surface, surface_format, surface_size: (0, 0),
             objs: Vec::new(), enc: None, enc_epoch: 1, pass: None, pass_key: None, pass_info: None, pass_st: PassSt::default(),
             map_programs: HashMap::new(), s: State::new(), pdirty: true, last_pl: None, shader_index, shader_dir, next_uid: 1,
@@ -2350,8 +2352,16 @@ impl Gpu {
         if let Some(tx) = self.pipe_jobs.clone() {
             let id = self.uid();
             self.pipe_pending.insert(id, (key.clone(), vb_req, job.label.clone()));
-            self.pipelines.insert(key, PipeEntry::Pending);
+            self.pipelines.insert(key.clone(), PipeEntry::Pending);
             let _ = tx.send((id, job));
+            let start = Instant::now();
+            let deadline = start + self.pipe_wait_left;
+            while let Ok((done, pipeline)) = self.pipe_results.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                self.finish_pipeline(done, pipeline);
+                if done == id { break; }
+            }
+            self.pipe_wait_left = self.pipe_wait_left.saturating_sub(start.elapsed());
+            if let Some(PipeEntry::Done(p)) = self.pipelines.get(&key) { return p.clone(); }
             self.pending_skips += 1;
             return None;
         }
@@ -2442,11 +2452,15 @@ impl Gpu {
 
     fn collect_pipelines(&mut self) {
         while let Ok((id, pipeline)) = self.pipe_results.try_recv() {
-            let Some((key, vb_req, label)) = self.pipe_pending.remove(&id) else { continue };
-            let entry = pipeline.map(|pipeline| { let uid = self.uid(); Rc::new(Pl { pipeline, uid, vb_req, label }) });
-            self.pipelines.insert(key, PipeEntry::Done(entry));
-            self.pdirty = true;
+            self.finish_pipeline(id, pipeline);
         }
+    }
+
+    fn finish_pipeline(&mut self, id: u64, pipeline: Option<RenderPipeline>) {
+        let Some((key, vb_req, label)) = self.pipe_pending.remove(&id) else { return };
+        let entry = pipeline.map(|pipeline| { let uid = self.uid(); Rc::new(Pl { pipeline, uid, vb_req, label }) });
+        self.pipelines.insert(key, PipeEntry::Done(entry));
+        self.pdirty = true;
     }
 
     fn vs_sig(&self) -> Option<Vec<SigEl>> {
@@ -3274,6 +3288,7 @@ impl Gpu {
         }
         self.collect_pipelines();
         self.presents += 1;
+        self.pipe_wait_left = PIPELINE_WAIT;
         PRESENTS.store(self.presents, Ordering::Relaxed);
         self.log_fps();
 

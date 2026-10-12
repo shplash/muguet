@@ -4,17 +4,73 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import os
+import Metal
+
+func memoryLimit() -> UInt64 {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+    }
+    return UInt64(os_proc_available_memory()) + (kr == KERN_SUCCESS ? info.phys_footprint : 0)
+}
+
+func hasMemoryEntitlement() -> Bool? {
+    typealias Create = @convention(c) (CFAllocator?) -> Unmanaged<AnyObject>?
+    typealias Copy = @convention(c) (AnyObject, CFString, UnsafeMutableRawPointer?) -> Unmanaged<AnyObject>?
+    guard let sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW),
+          let create = dlsym(sec, "SecTaskCreateFromSelf"), let copy = dlsym(sec, "SecTaskCopyValueForEntitlement"),
+          let task = unsafeBitCast(create, to: Create.self)(nil)?.takeRetainedValue() else { return nil }
+    let value = unsafeBitCast(copy, to: Copy.self)(task, "com.apple.developer.kernel.increased-memory-limit" as CFString, nil)?.takeRetainedValue()
+    return (value as? Bool) ?? false
+}
+
+@_cdecl("muguet_memory_limit")
+public func muguetMemoryLimit() -> UInt64 { memoryLimit() }
+
+@_cdecl("muguet_memory_entitled")
+public func muguetMemoryEntitled() -> Int32 { hasMemoryEntitlement().map { $0 ? 1 : 0 } ?? -1 }
 
 let configURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     .appendingPathComponent("config.json")
 
+enum Preset: String, CaseIterable {
+    case battery, balanced, quality, max, custom
+
+    var title: String { ["Battery", "Balanced", "Quality", "Max", "Custom"][Preset.allCases.firstIndex(of: self)!] }
+    var values: (scale: Double, textures: Int, fps: Int)? {
+        switch self {
+        case .battery: return (0.35, 0, 30)
+        case .balanced: return (0.5, 0, 60)
+        case .quality: return (0.75, 1, 60)
+        case .max: return (1.0, 2, 60)
+        case .custom: return nil
+        }
+    }
+    var summary: String {
+        guard let v = values else { return "" }
+        return "\(Int(v.scale * 100)) % resolution · \(["Normal", "High", "Very High"][v.textures]) textures · \(v.fps) fps"
+    }
+
+    static let recommended: Preset = {
+        let gb = Double(memoryLimit()) / 1_073_741_824
+        let family = MTLCreateSystemDefaultDevice().map { d in (7...12).last { d.supportsFamily(MTLGPUFamily(rawValue: 1000 + $0)!) } ?? 0 } ?? 0
+        if gb < 4 || family < 8 { return .battery }
+        if family >= 9 && gb >= 5 { return .quality }
+        return .balanced
+    }()
+}
+
 final class Settings: ObservableObject {
+    @Published var preset = Preset.recommended
     @Published var mode = 2
     @Published var scale = 0.5
     @Published var fps = 60
     @Published var textures = 0
     @Published var touch = 1.0
     @Published var mute = false
+    @Published var showFps = false
     @Published var multiplayer = false
     @Published var host = false
     @Published var server = ""
@@ -25,12 +81,15 @@ final class Settings: ObservableObject {
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         extra = json
+        if let v = json["graphics_preset"] as? String, let p = Preset(rawValue: v) { preset = p }
+        else if json["texture_quality"] != nil { preset = .custom }
         if let v = json["start_mode"] as? Int, (1...2).contains(v) { mode = v }
         if let v = json["scale"] as? Double { scale = v }
-        if let v = json["fps_limit"] as? Int { fps = v == 30 ? 30 : 60 }
+        if let v = json["fps_limit"] as? Int { fps = v <= 0 ? 0 : v <= 30 ? 30 : 60 }
         if let v = json["texture_quality"] as? Int, (0...2).contains(v) { textures = v }
         if let v = json["touch_sensitivity"] as? Double { touch = v }
         if let v = json["mute"] as? Bool { mute = v }
+        if let v = json["show_fps"] as? Bool { showFps = v }
         if let v = json["multiplayer"] as? Bool { multiplayer = v }
         if let v = json["host"] as? Bool { host = v }
         if let v = json["server"] as? String { server = v }
@@ -39,12 +98,15 @@ final class Settings: ObservableObject {
 
     func save() throws {
         var json = extra
+        if let v = preset.values { (scale, textures, fps) = v }
+        json["graphics_preset"] = preset.rawValue
         json["start_mode"] = mode
         json["scale"] = scale
         json["fps_limit"] = fps
         json["texture_quality"] = textures
         json["touch_sensitivity"] = (touch * 100).rounded() / 100
         json["mute"] = mute
+        json["show_fps"] = showFps
         json["multiplayer"] = multiplayer
         json["host"] = host
         json["server"] = server.trimmingCharacters(in: .whitespaces)
@@ -118,6 +180,7 @@ struct LauncherView: View {
                 } else {
                     if let error { Text(error).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }
                     playButton
+                    memoryView
                     Button("Import other game data…") { picking = true }.font(.caption)
                 }
                 Text("proudly made by c22dev").font(.caption).foregroundStyle(.secondary)
@@ -129,6 +192,18 @@ struct LauncherView: View {
                     Text("Story Mode").tag(1)
                     Text("Sandbox").tag(2)
                 }
+                Picker("Graphics", selection: $s.preset) {
+                    ForEach(Preset.allCases, id: \.self) { p in
+                        Text(p == Preset.recommended ? "\(p.title) (recommended)" : p.title).tag(p)
+                    }
+                }
+                if s.preset != .custom {
+                    Text(s.preset.summary).font(.caption).foregroundStyle(.secondary)
+                }
+                if let rank = Preset.allCases.firstIndex(of: s.preset), s.preset != .custom, rank > Preset.allCases.firstIndex(of: Preset.recommended)! {
+                    Text("Heavier than recommended for this device: it may run slowly or close.").font(.caption).foregroundStyle(.orange)
+                }
+                if s.preset == .custom {
                 Picker("Resolution", selection: $s.scale) {
                     Text("35 % (fastest)").tag(0.35)
                     Text("50 %").tag(0.5)
@@ -143,6 +218,8 @@ struct LauncherView: View {
                 Picker("Frame limit", selection: $s.fps) {
                     Text("30 fps (cooler)").tag(30)
                     Text("60 fps").tag(60)
+                    Text("Uncapped (hotter)").tag(0)
+                }
                 }
                 HStack {
                     Text("Look sensitivity")
@@ -150,6 +227,7 @@ struct LauncherView: View {
                     Text(String(format: "%.2f×", s.touch)).monospacedDigit().frame(width: 50, alignment: .trailing)
                 }
                 Toggle("Mute audio", isOn: $s.mute)
+                Toggle("Show frame rate", isOn: $s.showFps)
                 Section("Multiplayer") {
                     Toggle("Play with friends", isOn: $s.multiplayer)
                     if s.multiplayer {
@@ -200,6 +278,18 @@ struct LauncherView: View {
         }
     }
 
+    @ViewBuilder var memoryView: some View {
+        let gb = Double(memoryLimit()) / 1_073_741_824
+        Text(String(format: "Memory for the game: %.1f GB", gb)).font(.caption).foregroundStyle(.secondary)
+        if hasMemoryEntitlement() == false {
+            Text("This build wasn't signed with the increased memory limit, so the game will likely close after a few minutes. Re-sign it with AltStore or a developer account.")
+                .font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center)
+        } else if gb < 4 {
+            Text("That's not much for this game, so it may close after a few minutes.")
+                .font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center)
+        }
+    }
+
     @ViewBuilder var playButton: some View {
         let button = Button(action: start) {
             Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220)
@@ -240,6 +330,26 @@ func localIPs() -> [String] {
         }
     }
     return out.isEmpty ? ["?"] : out
+}
+
+final class RefreshRate: NSObject {
+    static let shared = RefreshRate()
+    private var link: CADisplayLink?
+
+    @objc private func tick() {}
+
+    func hold(_ hz: Float) {
+        link?.invalidate()
+        let l = CADisplayLink(target: self, selector: #selector(tick))
+        l.preferredFrameRateRange = CAFrameRateRange(minimum: hz, maximum: hz, preferred: hz)
+        l.add(to: .main, forMode: .common)
+        link = l
+    }
+}
+
+@_cdecl("muguet_hold_refresh")
+public func muguetHoldRefresh(_ hz: Float) {
+    RefreshRate.shared.hold(hz)
 }
 
 @_cdecl("muguet_show_launcher")

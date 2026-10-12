@@ -125,6 +125,58 @@ thread_local! {
     static OVERLAY: std::cell::RefCell<Option<Overlay>> = const { std::cell::RefCell::new(None) };
 }
 
+enum Fps {
+    Unset,
+    Off,
+    On { label: Retained<AnyObject>, at: std::time::Instant, presents: u64 },
+}
+thread_local! {
+    static FPS: std::cell::RefCell<Fps> = const { std::cell::RefCell::new(Fps::Unset) };
+}
+
+fn fps_label(o: &Overlay) -> Option<Retained<AnyObject>> {
+    unsafe {
+        let parent: Option<Retained<AnyObject>> = msg_send![&*o.root, superview];
+        let parent = parent?;
+        let l: Retained<AnyObject> = msg_send![class!(UILabel), new];
+        let _: () = msg_send![&*l, setFrame: rect(o.safe.0 + 226.0, o.safe.1 + 8.0, 58.0, 17.0)];
+        let _: () = msg_send![&*l, setUserInteractionEnabled: false];
+        let _: () = msg_send![&*l, setTextColor: &*color(1.0, 0.9)];
+        let _: () = msg_send![&*l, setBackgroundColor: &*color(0.0, 0.35)];
+        let font: Retained<AnyObject> = msg_send![class!(UIFont), monospacedDigitSystemFontOfSize: 11.0f64, weight: 0.3f64];
+        let _: () = msg_send![&*l, setFont: &*font];
+        let _: () = msg_send![&*l, setTextAlignment: 1isize];
+        let layer: *mut AnyObject = msg_send![&*l, layer];
+        let _: () = msg_send![layer, setCornerRadius: 4.0f64];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        let _: () = msg_send![&*parent, addSubview: &*l];
+        Some(l)
+    }
+}
+
+fn fps_tick(o: &Overlay) {
+    let now_presents = crate::gpu::PRESENTS.load(std::sync::atomic::Ordering::Relaxed);
+    if now_presents == 0 { return; }
+    FPS.with(|cell| {
+        let mut f = cell.borrow_mut();
+        if let Fps::Unset = *f {
+            let on = std::env::var("MUGUET_SHOW_FPS").map(|v| v != "0").unwrap_or(false);
+            *f = match (on, on.then(|| fps_label(o)).flatten()) {
+                (true, Some(label)) => Fps::On { label, at: std::time::Instant::now(), presents: now_presents },
+                _ => Fps::Off,
+            };
+        }
+        if let Fps::On { label, at, presents } = &mut *f {
+            let dt = at.elapsed().as_secs_f64();
+            if dt >= 0.5 {
+                set_text(label, &format!("{:.0} fps", (now_presents - *presents) as f64 / dt));
+                *at = std::time::Instant::now();
+                *presents = now_presents;
+            }
+        }
+    });
+}
+
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect { origin: CGPoint { x, y }, size: CGSize { width: w, height: h } }
 }
@@ -402,6 +454,7 @@ pub fn refresh() -> bool {
     OVERLAY.with(|cell| {
         let mut guard = cell.borrow_mut();
         let Some(o) = guard.as_mut() else { return false };
+        fps_tick(o);
         if o.lingering { o.apply(); }
         let mut wheeling = false;
         for g in o.grips.values() {

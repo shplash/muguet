@@ -22,7 +22,7 @@ BUNDLE_ID="${BUNDLE_ID:-ch.cclerc.muguet.ios}"
 ENTITLEMENTS=Muguet.entitlements
 HEAP_GB=8
 if [ "${FREE:-0}" = 1 ] || [ "$MODE" = "--ipa" ]; then
-  ENTITLEMENTS=Muguet-free.entitlements
+  ENTITLEMENTS=Muguet-sideload.entitlements
   HEAP_GB=5
 fi
 export MUGUET_IOS_HEAP_GB="${MUGUET_IOS_HEAP_GB:-$HEAP_GB}"

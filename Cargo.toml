@@ -21,7 +21,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
-objc2-game-controller = { version = "0.3", default-features = false, features = ["std", "GCController", "GCExtendedGamepad", "GCPhysicalInputProfile", "GCControllerElement", "GCControllerAxisInput", "GCControllerButtonInput", "GCControllerDirectionPad"] }
+objc2-game-controller = { version = "0.3", default-features = false, features = ["std", "GCController", "GCExtendedGamepad", "GCPhysicalInputProfile", "GCControllerElement", "GCControllerAxisInput", "GCControllerButtonInput", "GCControllerDirectionPad", "GCKeyboard", "GCKeyboardInput", "GCKeyCodes", "objc2-core-foundation"] }
 wasmparser = { version = "0.258.3", optional = true }
 wasm-encoder = { version = "0.258.3", optional = true, features = ["wasmparser"] }
 bcdec_rs = "0.2.0"

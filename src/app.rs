@@ -163,6 +163,8 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "ios")]
         if crate::touch::refresh() { wait = 15; }
         #[cfg(target_os = "ios")]
+        if crate::keyboard::poll() { wait = wait.min(8); }
+        #[cfg(target_os = "ios")]
         if !self.started {
             self.launcher();
             wait = 50;
@@ -213,6 +215,9 @@ impl App {
         extern "C" fn played() { PLAY.store(true, Ordering::SeqCst); }
         extern "C" {
             fn muguet_show_launcher(view_controller: *mut std::ffi::c_void, done: extern "C" fn());
+            fn muguet_hold_refresh(hz: f32);
+            fn muguet_memory_limit() -> u64;
+            fn muguet_memory_entitled() -> i32;
         }
         if self.started { return; }
         let Some(window) = self.window.clone() else { return };
@@ -230,6 +235,10 @@ impl App {
         }
         if PLAY.load(Ordering::SeqCst) {
             let settings = crate::config::reload();
+            let (limit, entitled) = unsafe { (muguet_memory_limit(), muguet_memory_entitled()) };
+            eprintln!("[host] iOS gives the game {} MB, increased memory limit entitlement: {}", limit >> 20, match entitled { 1 => "yes", 0 => "no", _ => "unknown" });
+            let uncapped = settings.iter().any(|a| a == "-frameLimit=0");
+            unsafe { muguet_hold_refresh(if uncapped { 120.0 } else { 60.0 }) };
             self.args.retain(|a| !a.starts_with("-frameLimit=") && !a.starts_with("-wasmstartchoice="));
             self.args.extend(settings);
             self.start_engine();

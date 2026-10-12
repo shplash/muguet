@@ -10,6 +10,8 @@ mod host;
 mod input;
 mod import;
 mod io;
+#[cfg(target_os = "ios")]
+mod keyboard;
 mod mp;
 mod pad;
 #[cfg(feature = "jit")]
