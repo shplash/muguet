@@ -15,6 +15,14 @@ enum Arg {
     Local1Replaced,
 
     MissingText,
+
+    TxdLoaded,
+
+    PoolGrow,
+    CashWrite,
+    OpusFrame,
+
+    ResourceMap,
 }
 
 const HOOKS: &[(&str, &str, &[Arg])] = &[
@@ -22,15 +30,20 @@ const HOOKS: &[(&str, &str, &[Arg])] = &[
     ("muguet_explosion", "CExplosionManager::AddExplosion(CExplosionManager::CExplosionArgs&, CProjectile*, bool)", &[Arg::Local0]),
     ("muguet_timewarp", "CTimeWarper::SetTargetTimeWarp(TW_Dir)", &[Arg::Local1Replaced]),
     ("muguet_text", "CTextFile::GetInternal(unsigned int)", &[Arg::MissingText]),
+    ("muguet_txd", "graphics_commands::HasStreamedTxdLoaded(char const*)", &[Arg::TxdLoaded, Arg::TxdLoaded]),
+    ("muguet_pool", "rage::sysMemGrowBuddyAllocator::GrowHeap()", &[Arg::PoolGrow]),
+    ("muguet_cash", "stats_commands::CommandStatSetInt(int, int, bool)", &[Arg::CashWrite, Arg::CashWrite]),
+    ("muguet_opus_frame", "opus_decode_frame", &[Arg::OpusFrame; 6]),
+    ("muguet_resource_map", "rage::datResourceInfo::GenerateMap(rage::datResourceMap&) const", &[Arg::ResourceMap]),
 ];
 
 const SCENARIO_CHECK: &str = "CScenarioManager::PerformCollisionChecksForScenarioPoint(CScenarioManager::CollisionCheckParams const&)";
 const MOVIE_PRELOAD: &str = "CMovieMgr::PreloadMovie(char const*, bool)";
 
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 11;
 
 fn returns(args: &[Arg]) -> bool {
-    args.contains(&Arg::Local1Replaced) || args.contains(&Arg::MissingText)
+    args.contains(&Arg::Local1Replaced) || args.contains(&Arg::MissingText) || args.contains(&Arg::TxdLoaded) || args.contains(&Arg::PoolGrow) || args.contains(&Arg::CashWrite) || args.contains(&Arg::OpusFrame)
 }
 
 struct Patcher {
@@ -41,6 +54,7 @@ struct Patcher {
     targets: HashMap<u32, usize>,
     scenario_check: Option<u32>,
     movie_preload: Option<u32>,
+    pool_size: Option<u32>,
     exports: Vec<(String, u32)>,
     next_func: u32,
 }
@@ -114,7 +128,36 @@ impl Reencode for Patcher {
         let mut f = self.new_function_with_parsed_locals(&func)?;
         use wasm_encoder::Instruction as I;
         let call = I::Call(self.imported_funcs + hook as u32);
-        if HOOKS[hook].2 == [Arg::MissingText] {
+        if HOOKS[hook].2 == [Arg::ResourceMap] {
+            let mut reader = func.get_operators_reader()?;
+            let mut body = Vec::new();
+            while !reader.eof() {
+                body.push(self.parse_instruction(&mut reader)?);
+            }
+            let end = body.pop();
+            for i in &body {
+                f.instruction(i);
+            }
+            f.instruction(&I::LocalGet(1)).instruction(&call);
+            if let Some(e) = end {
+                f.instruction(&e);
+            }
+            code.function(&f);
+            return Ok(());
+        }
+        if HOOKS[hook].2 == [Arg::PoolGrow] {
+            let Some(size) = self.pool_size else { return Err(Error::UserError(anyhow::anyhow!("GetHeapSize not found"))) };
+            f.instruction(&I::LocalGet(0)).instruction(&I::Call(size + self.shift())).instruction(&call).instruction(&I::I64Eqz);
+            f.instruction(&I::If(wasm_encoder::BlockType::Empty));
+            f.instruction(&I::I32Const(-1)).instruction(&I::Return);
+            f.instruction(&I::End);
+        } else if HOOKS[hook].2.contains(&Arg::OpusFrame) {
+            for (k, wide) in [true, true, false, true, false, false].into_iter().enumerate() {
+                f.instruction(&I::LocalGet(k as u32));
+                if !wide { f.instruction(&I::I64ExtendI32S); }
+            }
+            f.instruction(&call).instruction(&I::I32WrapI64).instruction(&I::Return);
+        } else if HOOKS[hook].2 == [Arg::MissingText] {
             // only call out for the listed hashes: text lookups are hot
             for (label, _) in crate::host::MISSING_TEXT {
                 f.instruction(&I::LocalGet(0)).instruction(&I::I32Const(crate::proto::joaat(label) as i32)).instruction(&I::I32Eq);
@@ -122,13 +165,37 @@ impl Reencode for Patcher {
                 f.instruction(&I::LocalGet(0)).instruction(&I::I64ExtendI32U).instruction(&call).instruction(&I::Return);
                 f.instruction(&I::End);
             }
+        } else if HOOKS[hook].2.first() == Some(&Arg::CashWrite) {
+            for k in 0..3 {
+                f.instruction(&I::LocalGet(0)).instruction(&I::I32Const(crate::proto::joaat(&format!("SP{k}_TOTAL_CASH")) as i32)).instruction(&I::I32Eq);
+                f.instruction(&I::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&I::LocalGet(1)).instruction(&I::I64ExtendI32S).instruction(&I::GlobalGet(self.tls_global)).instruction(&call).instruction(&I::I64Eqz).instruction(&I::I32Eqz);
+                f.instruction(&I::If(wasm_encoder::BlockType::Empty)).instruction(&I::I32Const(1)).instruction(&I::Return).instruction(&I::End);
+                f.instruction(&I::End);
+            }
+        } else if HOOKS[hook].2.first() == Some(&Arg::TxdLoaded) {
+            f.instruction(&I::LocalGet(0)).instruction(&I::I64Const(0)).instruction(&call).instruction(&I::Drop);
+            let mut reader = func.get_operators_reader()?;
+            let mut last = None;
+            while !reader.eof() {
+                let i = self.parse_instruction(&mut reader)?;
+                if let (I::Return, Some(I::LocalGet(2))) = (&i, &last) {
+                    f.instruction(&I::Drop);
+                    f.instruction(&I::I64Const(0)).instruction(&I::LocalGet(2)).instruction(&I::I64ExtendI32U).instruction(&I::I64Const(1)).instruction(&I::I64Add);
+                    f.instruction(&call).instruction(&I::I32WrapI64);
+                }
+                f.instruction(&i);
+                last = Some(i);
+            }
+            code.function(&f);
+            return Ok(());
         } else {
             for arg in HOOKS[hook].2 {
                 match arg {
                     Arg::Local0 => f.instruction(&I::LocalGet(0)),
                     Arg::TlsBase => f.instruction(&I::GlobalGet(self.tls_global)),
                     Arg::Local1Replaced => f.instruction(&I::LocalGet(1)).instruction(&I::I64ExtendI32U),
-                    Arg::MissingText => unreachable!(),
+                    Arg::MissingText | Arg::TxdLoaded | Arg::PoolGrow | Arg::CashWrite | Arg::OpusFrame | Arg::ResourceMap => unreachable!(),
                 };
             }
             f.instruction(&call);
@@ -215,6 +282,7 @@ pub fn patch(wasm: &[u8], wanted: &[(&str, &str)]) -> Result<Vec<u8>> {
         targets,
         scenario_check: by_name.get(SCENARIO_CHECK).copied(),
         movie_preload: by_name.get(MOVIE_PRELOAD).copied(),
+        pool_size: by_name.get("rage::sysMemGrowBuddyAllocator::GetHeapSize() const").copied(),
         exports,
         next_func: imported_funcs,
     };

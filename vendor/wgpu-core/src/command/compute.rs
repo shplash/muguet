@@ -698,6 +698,8 @@ pub(super) fn encode_compute_pass(
             binder: Binder::new(),
             temp_offsets: Vec::new(),
             dynamic_offset_count: 0,
+            merged_bind_groups: Default::default(),
+            inited_bind_groups: Default::default(),
             pending_discard_init_fixups: SurfacesInDiscardState::new(),
             scope: device.new_usage_scope(),
             string_offset: 0,

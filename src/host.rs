@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use wasmtime::{Caller, SharedMemory, Val};
 
@@ -28,6 +28,17 @@ impl std::error::Error for LongJmp {}
 static PENDING_MAILBOX: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 static ANY_PENDING: AtomicU64 = AtomicU64::new(0);
 static STUB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+static STOPPED: AtomicBool = AtomicBool::new(false);
+static FATAL: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn engine_stopped() -> bool {
+    !STOPPED.swap(true, Ordering::Relaxed)
+}
+
+pub fn stop_reason() -> Option<String> {
+    STOPPED.load(Ordering::Relaxed).then(|| FATAL.lock().unwrap().clone().unwrap_or_else(|| "A game thread stopped with an error.".into()))
+}
 
 thread_local! {
     static PENDING_LONGJMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -123,6 +134,16 @@ pub fn call(mut caller: Caller<'_, HostState>, idx: usize, params: &[Val], resul
         "muguet_script" => crate::mp::script_tick(&mut caller, int(params, 0) as u64, int(params, 1) as u64)?,
         "muguet_explosion" => crate::mp::explosion(int(params, 0) as u64),
         "muguet_timewarp" => set_int(results, crate::mp::time_warp(int(params, 0))),
+        "muguet_resource_map" => merge_physical_pages(mem, int(params, 0) as u64),
+        "muguet_pool" => set_int(results, pool_grow(int(params, 0) as u64) as i64),
+        "muguet_cash" => set_int(results, crate::mp::cash_write(int(params, 0), int(params, 1) as u64) as i64),
+        "muguet_txd" => set_int(results, crate::mp::txd_loaded(int(params, 0) as u64, int(params, 1))),
+        "muguet_opus_frame" => {
+            let (base, len) = crate::mem_base_len(mem);
+            let heap = unsafe { std::slice::from_raw_parts_mut(base, len) };
+            let p = |i| int(params, i);
+            set_int(results, crate::opus::decode_frame(heap, p(0) as u64, p(1) as u64, p(2) as i32, p(3) as u64, p(4) as i32, p(5) as i32))
+        }
         "muguet_text" => set_int(results, missing_text(&mut caller, int(params, 0) as u32)? as i64),
         "__pthread_create_js" => {
             let r = spawn_pthread(int(params, 0) as u64, int(params, 2) as u64, int(params, 3) as u64);
@@ -180,7 +201,11 @@ pub fn call(mut caller: Caller<'_, HostState>, idx: usize, params: &[Val], resul
         "environ_get" => set_int(results, 0),
 
         "wasm_print_line_js" | "wasm_hang_line_js" => {
-            eprintln!("[eng] {}", read_cstr(mem, int(params, 0) as u64));
+            let line = read_cstr(mem, int(params, 0) as u64);
+            if let Some(at) = line.find("Fatal Error: ") {
+                FATAL.lock().unwrap().get_or_insert_with(|| line[at + 13..].to_string());
+            }
+            eprintln!("[eng] {line}");
         }
         "wasm_module_int_js" => set_int(results, int(params, 1)),
         "wasm_has_page_js" => set_int(results, 1),
@@ -241,6 +266,45 @@ fn invoke(caller: &mut Caller<'_, HostState>, params: &[Val], results: &mut [Val
         }
         Err(e) => Err(anyhow::Error::from(e)),
     }
+}
+
+const STEP: u64 = 256 << 20;
+
+fn merge_physical_pages(mem: &SharedMemory, map: u64) {
+    let virt = crate::read_bytes(mem, map, 1)[0] as u64;
+    let entry = |k: u64| map + 16 + 24 * k;
+    let q = |a: u64| read_u64(mem, a).unwrap_or(0);
+    'merge: loop {
+        let phys = crate::read_bytes(mem, map + 1, 1)[0] as u64;
+        for k in virt..(virt + phys).saturating_sub(1) {
+            let (a, b) = (entry(k), entry(k + 1));
+            let size = q(a + 16);
+            if size == 0 || q(b + 16) != size || q(b) != q(a) + size {
+                continue;
+            }
+            write_u64(mem, a + 16, size * 2);
+            let tail = virt + phys - (k + 2);
+            let moved = crate::read_bytes(mem, entry(k + 2), 24 * tail);
+            write_bytes(mem, b, &moved);
+            write_bytes(mem, entry(virt + phys - 1), &[0; 24]);
+            write_bytes(mem, map + 1, &[(phys - 1) as u8]);
+            continue 'merge;
+        }
+        return;
+    }
+}
+
+fn pool_grow(size: u64) -> bool {
+    static CAP: LazyLock<u64> = LazyLock::new(|| {
+        let mb = std::env::var("MUGUET_POOL_CAP_MB").ok().and_then(|v| v.parse::<u64>().ok());
+        mb.map(|mb| mb << 20).unwrap_or(if cfg!(target_os = "ios") { 2560 << 20 } else { u64::MAX })
+    });
+    let ok = size.saturating_add(STEP) <= CAP.saturating_add(16 << 20);
+    static TOLD: AtomicBool = AtomicBool::new(false);
+    if !ok && !TOLD.swap(true, Ordering::Relaxed) {
+        eprintln!("[host] streaming pool at {} MB, not growing it past the {} MB cap", size >> 20, *CAP >> 20);
+    }
+    ok
 }
 
 fn resize_heap(mem: &SharedMemory, requested: u64) -> bool {

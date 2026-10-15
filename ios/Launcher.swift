@@ -32,8 +32,91 @@ public func muguetMemoryLimit() -> UInt64 { memoryLimit() }
 @_cdecl("muguet_memory_entitled")
 public func muguetMemoryEntitled() -> Int32 { hasMemoryEntitlement().map { $0 ? 1 : 0 } ?? -1 }
 
-let configURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    .appendingPathComponent("config.json")
+let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+let configURL = documentsURL.appendingPathComponent("config.json")
+
+let savesRoot = documentsURL.appendingPathComponent("saves")
+let defaultTitle = "GTA V"
+
+func saveSlot(of name: String) -> Int? {
+    guard name.hasPrefix("SGTA5") else { return nil }
+    let digits = name.dropFirst(5)
+    guard digits.count == 4, digits.allSatisfy(\.isNumber) else { return nil }
+    return Int(digits)
+}
+
+final class SaveImporter: ObservableObject {
+    @Published var status: String?
+    @Published var statusIsError = false
+
+    func importSave(_ source: URL) {
+        let fm = FileManager.default
+        let name = source.lastPathComponent
+        statusIsError = false
+        guard saveSlot(of: name) != nil else { return fail("That doesn't look like a save file (SGTA5xxxx).") }
+
+        let dir = savesRoot
+            .appendingPathComponent("userdata/Documents/Rockstar Games")
+            .appendingPathComponent(defaultTitle)
+            .appendingPathComponent("Default")
+        let dest = dir.appendingPathComponent(name)
+        if source.standardizedFileURL == dest.standardizedFileURL {
+            return fail("That file is already the active save.")
+        }
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        var backup: URL?
+        var installed = false
+        do {
+            let staged = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+            defer { try? fm.removeItem(at: staged) }
+            if fm.fileExists(atPath: staged.path) { try fm.removeItem(at: staged) }
+            try fm.copyItem(at: source, to: staged)
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dest.path) {
+                let b = backupURL(for: dest, title: defaultTitle)
+                try fm.copyItem(at: dest, to: b)
+                backup = b
+                try fm.removeItem(at: dest)
+            }
+            try fm.copyItem(at: staged, to: dest)
+            installed = true
+            let slot = saveSlot(of: name) ?? 0
+            status = "Imported \(name)."
+                + (backup == nil ? "" : " Previous save backed up.")
+                + (newerSlotNotice(in: dir, than: slot) ?? "")
+        } catch {
+            if !installed {
+                try? fm.removeItem(at: dest)
+                if let b = backup { try? fm.copyItem(at: b, to: dest) }
+            }
+            fail("Could not import save: \(error.localizedDescription)")
+        }
+    }
+
+    private func newerSlotNotice(in dir: URL, than slot: Int) -> String? {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        guard let newest = names.compactMap({ saveSlot(of: $0) }).filter({ $0 > slot }).max() else { return nil }
+        return " SGTA5\(String(format: "%04d", newest)) is newer and will be loaded instead."
+    }
+
+    private func fail(_ message: String) {
+        status = message
+        statusIsError = true
+    }
+
+    private func backupURL(for dest: URL, title: String) -> URL {
+        let dir = savesRoot.appendingPathComponent("save-backups").appendingPathComponent(title)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let name = "\(dest.lastPathComponent).\(stamp)"
+        var url = dir.appendingPathComponent("\(name).bak")
+        if FileManager.default.fileExists(atPath: url.path) {
+            url = dir.appendingPathComponent("\(name)-\(UUID().uuidString.prefix(4)).bak")
+        }
+        return url
+    }
+}
 
 enum Preset: String, CaseIterable {
     case battery, balanced, quality, max, custom
@@ -71,6 +154,7 @@ final class Settings: ObservableObject {
     @Published var touch = 1.0
     @Published var mute = false
     @Published var showFps = false
+    @Published var noMsaa = true
     @Published var multiplayer = false
     @Published var host = false
     @Published var server = ""
@@ -90,6 +174,7 @@ final class Settings: ObservableObject {
         if let v = json["touch_sensitivity"] as? Double { touch = v }
         if let v = json["mute"] as? Bool { mute = v }
         if let v = json["show_fps"] as? Bool { showFps = v }
+        if let v = json["no_msaa"] as? Bool { noMsaa = v }
         if let v = json["multiplayer"] as? Bool { multiplayer = v }
         if let v = json["host"] as? Bool { host = v }
         if let v = json["server"] as? String { server = v }
@@ -107,6 +192,7 @@ final class Settings: ObservableObject {
         json["touch_sensitivity"] = (touch * 100).rounded() / 100
         json["mute"] = mute
         json["show_fps"] = showFps
+        json["no_msaa"] = noMsaa
         json["multiplayer"] = multiplayer
         json["host"] = host
         json["server"] = server.trimmingCharacters(in: .whitespaces)
@@ -162,9 +248,11 @@ final class Importer: ObservableObject {
 
 struct LauncherView: View {
     @StateObject private var s = Settings()
+    @StateObject private var save = SaveImporter()
     @ObservedObject private var importer = Importer.shared
     @State private var error: String?
     @State private var picking = false
+    @State private var pickingSave = false
     @Environment(\.scenePhase) private var phase
     let play: () -> Void
 
@@ -228,6 +316,7 @@ struct LauncherView: View {
                 }
                 Toggle("Mute audio", isOn: $s.mute)
                 Toggle("Show frame rate", isOn: $s.showFps)
+                Toggle("Turn off MSAA and TXAA (saves memory)", isOn: $s.noMsaa)
                 Section("Multiplayer") {
                     Toggle("Play with friends", isOn: $s.multiplayer)
                     if s.multiplayer {
@@ -248,8 +337,19 @@ struct LauncherView: View {
                         }
                     }
                 }
+                Section("Load custom save") {
+                    Button("Import save…") { pickingSave = true }
+                    Text("Your current save is kept in the saves/save-backups folder.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let st = save.status {
+                        Text(st).font(.caption).foregroundStyle(save.statusIsError ? Color.red : Color.secondary)
+                    }
+                }
             }
             .frame(maxWidth: .infinity)
+            .fileImporter(isPresented: $pickingSave, allowedContentTypes: [.item]) { result in
+                if case .success(let url) = result { save.importSave(url) }
+            }
         }
         .preferredColorScheme(.dark)
         .fileImporter(isPresented: $picking, allowedContentTypes: [.zip]) { result in

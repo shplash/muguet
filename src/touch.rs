@@ -23,6 +23,9 @@ enum Act {
     NavToggle,
 
     Horn,
+
+    Ctrl(i32, f32),
+    Req(crate::pad::Request),
 }
 
 #[derive(Clone, Copy)]
@@ -34,37 +37,122 @@ enum Anchor {
     Nav(f64, f64),
 }
 
+const FOOT: usize = 0;
+const HELI: usize = 3;
+const PLANE: usize = 4;
+const SUB: usize = 6;
+const MODES: usize = 9;
+
+type Slot = Option<(&'static str, Act)>;
+
 struct Spec {
     anchor: Anchor,
     radius: f64,
-    on_foot: Option<(&'static str, Act)>,
-    in_car: Option<(&'static str, Act)>,
+    acts: [Slot; MODES],
+    need: u32,
+    unless: u32,
     nav: bool,
 }
 
-const fn b(anchor: Anchor, radius: f64, on_foot: Option<(&'static str, Act)>, in_car: Option<(&'static str, Act)>) -> Spec {
-    Spec { anchor, radius, on_foot, in_car, nav: false }
+const fn b(anchor: Anchor, radius: f64, acts: [Slot; MODES]) -> Spec {
+    Spec { anchor, radius, acts, need: 0, unless: 0, nav: false }
+}
+const fn all(anchor: Anchor, radius: f64, label: &'static str, act: Act) -> Spec {
+    b(anchor, radius, [Some((label, act)); MODES])
+}
+const fn driving(anchor: Anchor, radius: f64, slot: Slot) -> Spec {
+    b(anchor, radius, [None, slot, slot, slot, slot, slot, slot, slot, None])
+}
+const fn when(need: u32, anchor: Anchor, label: &'static str, act: Act) -> Spec {
+    let slot = Some((label, act));
+    Spec { anchor, radius: 24.0, acts: [None, slot, slot, slot, slot, slot, slot, slot, None], need, unless: 0, nav: false }
+}
+const fn held(need: u32, unless: u32, anchor: Anchor, radius: f64, label: &'static str, act: Act) -> Spec {
+    let mut acts = [None; MODES];
+    acts[FOOT] = Some((label, act));
+    Spec { anchor, radius, acts, need, unless, nav: false }
 }
 const fn n(x: f64, label: &'static str, key: &'static str) -> Spec {
-    Spec { anchor: Anchor::Nav(x, 0.0), radius: 21.0, on_foot: Some((label, Act::Key(key))), in_car: Some((label, Act::Key(key))), nav: true }
+    Spec { anchor: Anchor::Nav(x, 0.0), radius: 21.0, acts: [Some((label, Act::Key(key))); MODES], need: 0, unless: 0, nav: true }
+}
+const fn on(label: &'static str, control: i32) -> Slot {
+    Some((label, Act::Ctrl(control, 1.0)))
 }
 
+const VEH_MOVE_LR: i32 = 59;
+const VEH_MOVE_UD: i32 = 60;
+const VEH_ACCELERATE: i32 = 71;
+const VEH_BRAKE: i32 = 72;
+const VEH_DUCK: i32 = 73;
+const VEH_HEADLIGHT: i32 = 74;
+const VEH_HANDBRAKE: i32 = 76;
+const VEH_LOOK_BEHIND: i32 = 79;
+const VEH_FLY_THROTTLE_UP: i32 = 87;
+const VEH_FLY_THROTTLE_DOWN: i32 = 88;
+const VEH_FLY_YAW_LEFT: i32 = 89;
+const VEH_FLY_YAW_RIGHT: i32 = 90;
+const VEH_PASSENGER_AIM: i32 = 91;
+const VEH_PASSENGER_ATTACK: i32 = 92;
+const VEH_ROOF: i32 = 101;
+const VEH_FLY_ROLL_LR: i32 = 107;
+const VEH_FLY_PITCH_UD: i32 = 110;
+const VEH_FLY_UNDERCARRIAGE: i32 = 113;
+const VEH_FLY_ATTACK: i32 = 114;
+const VEH_FLY_VERTICAL_FLIGHT_MODE: i32 = 119;
+const VEH_SUB_TURN_LR: i32 = 123;
+const VEH_SUB_PITCH_UD: i32 = 126;
+const VEH_SUB_THROTTLE_UP: i32 = 129;
+const VEH_SUB_THROTTLE_DOWN: i32 = 130;
+const VEH_SUB_ASCEND: i32 = 131;
+const VEH_SUB_DESCEND: i32 = 132;
+const VEH_PUSHBIKE_PEDAL: i32 = 136;
+const VEH_PUSHBIKE_SPRINT: i32 = 137;
+const VEH_PUSHBIKE_FRONT_BRAKE: i32 = 138;
+
+use crate::pad::{CTX_CARGOBOB, CTX_CONVERTIBLE, CTX_GUN, CTX_MELEE, CTX_ROPE, CTX_THROWN, CTX_TOWING, CTX_TRAILER, CTX_VTOL};
+use crate::pad::Request as R;
 use Act::*;
 use Anchor::*;
+const GAS: Slot = on("GAS", VEH_ACCELERATE);
+const BRAKE: Slot = on("BRAKE", VEH_BRAKE);
+const HBRAKE: Slot = on("H.BRAKE", VEH_HANDBRAKE);
+const HORN: Slot = Some(("HORN", Horn));
+const SHOOT: Slot = Some(("SHOOT", Mouse(1)));
+const AIR_SHOOT: Slot = on("SHOOT", VEH_FLY_ATTACK);
+const DUCK: Slot = on("DUCK", VEH_DUCK);
+const RADIO: Slot = Some(("RADIO", Key("KeyQ")));
+const BACK: Slot = on("LOOK\nBACK", VEH_LOOK_BEHIND);
+const YAW_L: Slot = on("YAW\nLEFT", VEH_FLY_YAW_LEFT);
+const YAW_R: Slot = on("YAW\nRIGHT", VEH_FLY_YAW_RIGHT);
 const BUTTONS: &[Spec] = &[
-    b(BottomRight(62.0, 68.0), 40.0, Some(("FIRE", Mouse(1))), Some(("GAS", Key("KeyW")))),
-    b(BottomRight(158.0, 46.0), 31.0, Some(("AIM", AimToggle)), Some(("BRAKE", Key("KeyS")))),
-    b(BottomRight(58.0, 168.0), 28.0, Some(("JUMP", Key("Space"))), Some(("H.BRAKE", Key("Space")))),
-    b(BottomRight(140.0, 132.0), 26.0, Some(("ENTER", Key("KeyF"))), Some(("EXIT", Key("KeyF")))),
-    b(BottomRight(222.0, 98.0), 24.0, Some(("RELOAD", Key("KeyR"))), Some(("HORN", Horn))),
-    b(TopRight(30.0, 30.0), 22.0, Some(("WEAPON", Key("Tab"))), Some(("WEAPON", Key("Tab")))),
-    b(TopRight(84.0, 30.0), 22.0, Some(("COVER", Key("KeyQ"))), Some(("RADIO", Key("KeyQ")))),
-    b(TopRight(138.0, 30.0), 22.0, Some(("CROUCH", Key("ControlLeft"))), Some(("LOOK\nBACK", Key("KeyC")))),
-    b(TopRight(192.0, 30.0), 22.0, Some(("CAM", Key("KeyV"))), Some(("CAM", Key("KeyV")))),
-    b(TopLeft(30.0, 30.0), 22.0, Some(("PAUSE", KeyNav("Escape"))), Some(("PAUSE", KeyNav("Escape")))),
-    b(TopLeft(84.0, 30.0), 22.0, Some(("PHONE", KeyNav("ArrowUp"))), Some(("PHONE", KeyNav("ArrowUp")))),
-    b(TopLeft(138.0, 30.0), 22.0, Some(("MENU\nKEYS", NavToggle)), Some(("MENU\nKEYS", NavToggle))),
-    b(TopLeft(192.0, 30.0), 22.0, Some(("SWITCH", Key("AltLeft"))), Some(("SWITCH", Key("AltLeft")))),
+    held(0, CTX_GUN | CTX_MELEE | CTX_THROWN, BottomRight(62.0, 68.0), 40.0, "PUNCH", Mouse(1)),
+    held(CTX_GUN, 0, BottomRight(62.0, 68.0), 40.0, "FIRE", Mouse(1)),
+    held(CTX_MELEE, 0, BottomRight(62.0, 68.0), 40.0, "ATTACK", Mouse(1)),
+    held(CTX_THROWN, 0, BottomRight(62.0, 68.0), 40.0, "THROW", Mouse(1)),
+    held(CTX_GUN, 0, BottomRight(222.0, 98.0), 24.0, "RELOAD", Key("KeyR")),
+    b(BottomRight(62.0, 68.0), 40.0, [None, GAS, GAS, on("UP", VEH_FLY_THROTTLE_UP), on("THRUST", VEH_FLY_THROTTLE_UP), GAS, on("GAS", VEH_SUB_THROTTLE_UP), on("PEDAL", VEH_PUSHBIKE_PEDAL), on("SHOOT", VEH_PASSENGER_ATTACK)]),
+    b(BottomRight(158.0, 46.0), 31.0, [Some(("AIM", AimToggle)), BRAKE, BRAKE, on("DOWN", VEH_FLY_THROTTLE_DOWN), on("SLOW", VEH_FLY_THROTTLE_DOWN), on("REVERSE", VEH_BRAKE), on("REVERSE", VEH_SUB_THROTTLE_DOWN), on("BRAKE", VEH_PUSHBIKE_FRONT_BRAKE), on("AIM", VEH_PASSENGER_AIM)]),
+    b(BottomRight(58.0, 168.0), 28.0, [Some(("JUMP", Key("Space"))), HBRAKE, HBRAKE, YAW_L, YAW_L, None, on("RISE", VEH_SUB_ASCEND), on("HOP", VEH_HANDBRAKE), None]),
+    all(BottomRight(140.0, 132.0), 26.0, "EXIT", Key("KeyF")).foot(Some(("ENTER", Key("KeyF")))),
+    b(BottomRight(222.0, 98.0), 24.0, [None, HORN, HORN, YAW_R, YAW_R, HORN, on("DIVE", VEH_SUB_DESCEND), on("SPRINT", VEH_PUSHBIKE_SPRINT), None]),
+    b(BottomRight(140.0, 200.0), 24.0, [Some(("ACTION", Key("KeyE"))), SHOOT, SHOOT, AIR_SHOOT, AIR_SHOOT, None, None, None, None]),
+    b(BottomRight(222.0, 160.0), 24.0, [None, DUCK, DUCK, None, on("GEAR", VEH_FLY_UNDERCARRIAGE), None, None, None, DUCK]),
+    when(CTX_TOWING, BottomRight(300.0, 70.0), "DROP\nCAR", Req(R::DropTow)),
+    when(CTX_TRAILER, BottomRight(300.0, 70.0), "DROP\nTRAILER", Req(R::DropTrailer)),
+    when(CTX_CARGOBOB, BottomRight(300.0, 70.0), "LOWER\nROPE", Req(R::Rope)).unless(CTX_ROPE),
+    when(CTX_CARGOBOB | CTX_ROPE, BottomRight(300.0, 70.0), "DROP\nLOAD", Req(R::Rope)),
+    when(CTX_VTOL, BottomRight(300.0, 70.0), "VTOL", Ctrl(VEH_FLY_VERTICAL_FLIGHT_MODE, 1.0)),
+    when(CTX_CONVERTIBLE, BottomRight(300.0, 132.0), "ROOF", Ctrl(VEH_ROOF, 1.0)),
+    all(TopRight(30.0, 30.0), 22.0, "WEAPON", Key("Tab")),
+    b(TopRight(84.0, 30.0), 22.0, [Some(("COVER", Key("KeyQ"))), RADIO, RADIO, RADIO, RADIO, RADIO, RADIO, None, RADIO]),
+    b(TopRight(138.0, 30.0), 22.0, [Some(("CROUCH", Key("ControlLeft"))), BACK, BACK, None, None, BACK, None, BACK, BACK]),
+    all(TopRight(192.0, 30.0), 22.0, "CAM", Key("KeyV")),
+    driving(TopRight(30.0, 84.0), 22.0, on("LIGHTS", VEH_HEADLIGHT)),
+    all(TopRight(84.0, 84.0), 22.0, "ABILITY", Key("CapsLock")),
+    all(TopLeft(30.0, 30.0), 22.0, "PAUSE", KeyNav("Escape")),
+    all(TopLeft(84.0, 30.0), 22.0, "PHONE", KeyNav("ArrowUp")),
+    all(TopLeft(138.0, 30.0), 22.0, "MENU\nKEYS", NavToggle),
+    all(TopLeft(192.0, 30.0), 22.0, "SWITCH", Key("AltLeft")),
     n(-135.0, "◀", "ArrowLeft"),
     n(-87.0, "▲", "ArrowUp"),
     n(-39.0, "▼", "ArrowDown"),
@@ -72,6 +160,19 @@ const BUTTONS: &[Spec] = &[
     n(63.0, "OK", "Enter"),
     n(117.0, "BACK", "Backspace"),
 ];
+
+impl Spec {
+    const fn unless(mut self, bits: u32) -> Spec {
+        self.unless = bits;
+        self
+    }
+    const fn foot(mut self, slot: Slot) -> Spec {
+        self.acts[FOOT] = slot;
+        self
+    }
+}
+
+
 
 const STICK_RADIUS: f64 = 58.0;
 const KNOB_RADIUS: f64 = 26.0;
@@ -84,16 +185,20 @@ const WHEEL_PUSH: f64 = 40.0;
 static TOUCH_SENS: std::sync::LazyLock<f64> = std::sync::LazyLock::new(|| std::env::var("MUGUET_TOUCH_SENS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0));
 
 const MIN_HOLD: std::time::Duration = std::time::Duration::from_millis(120);
+const ROOF_HOLD: std::time::Duration = std::time::Duration::from_millis(1000);
+const CLICK_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 enum Grip {
     Stick { origin: (f64, f64), at: (f64, f64) },
     Look { last: (f64, f64) },
     Button { idx: usize, start: (f64, f64), last: (f64, f64) },
+    Cursor { since: std::time::Instant, up: bool },
 }
 
 struct Btn {
     view: Retained<AnyObject>,
     label: Retained<AnyObject>,
+    icon: Retained<AnyObject>,
     center: (f64, f64),
     radius: f64,
 }
@@ -106,6 +211,7 @@ struct Overlay {
     stick_home: (f64, f64),
 
     safe: (f64, f64, f64, f64),
+    full: (f64, f64),
     scale: f64,
     grips: HashMap<u64, Grip>,
     held: HashSet<&'static str>,
@@ -118,7 +224,12 @@ struct Overlay {
     aim_latched: bool,
     nav: bool,
     in_car: bool,
+    mode: usize,
+    ctx: u32,
+    menu: bool,
     hidden: bool,
+    ctrl_since: HashMap<i32, std::time::Instant>,
+    injected: Vec<(i32, f32)>,
 }
 
 thread_local! {
@@ -151,6 +262,31 @@ fn fps_label(o: &Overlay) -> Option<Retained<AnyObject>> {
         let _: () = msg_send![layer, setMasksToBounds: true];
         let _: () = msg_send![&*parent, addSubview: &*l];
         Some(l)
+    }
+}
+
+thread_local! {
+    static STOP_NOTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn stop_tick(o: &Overlay) {
+    if STOP_NOTE.get() { return; }
+    let Some(reason) = crate::host::stop_reason() else { return };
+    STOP_NOTE.set(true);
+    unsafe {
+        let parent: Option<Retained<AnyObject>> = msg_send![&*o.root, superview];
+        let Some(parent) = parent else { return };
+        let bounds: CGRect = msg_send![&*parent, bounds];
+        let l: Retained<AnyObject> = msg_send![class!(UILabel), new];
+        let _: () = msg_send![&*l, setFrame: bounds];
+        let _: () = msg_send![&*l, setNumberOfLines: 0isize];
+        let _: () = msg_send![&*l, setTextAlignment: 1isize];
+        let _: () = msg_send![&*l, setTextColor: &*color(1.0, 1.0)];
+        let _: () = msg_send![&*l, setBackgroundColor: &*color(0.0, 0.8)];
+        let font: Retained<AnyObject> = msg_send![class!(UIFont), systemFontOfSize: 17.0f64];
+        let _: () = msg_send![&*l, setFont: &*font];
+        set_text(&l, &format!("The game hit an error and can't continue.\n\n{reason}\n\nClose Muguet from the app switcher and open it again."));
+        let _: () = msg_send![&*parent, addSubview: &*l];
     }
 }
 
@@ -204,6 +340,8 @@ fn label(parent: &AnyObject, r: f64) -> Retained<AnyObject> {
         let _: () = msg_send![&*l, setFrame: rect(2.0, 0.0, 2.0 * r - 4.0, 2.0 * r)];
         let _: () = msg_send![&*l, setUserInteractionEnabled: false];
         let _: () = msg_send![&*l, setTextColor: &*color(1.0, 0.9)];
+        let _: () = msg_send![&*l, setShadowColor: &*color(0.0, 0.85)];
+        let _: () = msg_send![&*l, setShadowOffset: CGSize { width: 0.0, height: 1.0 }];
         let font: Retained<AnyObject> = msg_send![class!(UIFont), boldSystemFontOfSize: (r * 0.42).clamp(9.0, 15.0)];
         let _: () = msg_send![&*l, setFont: &*font];
         let _: () = msg_send![&*l, setTextAlignment: 1isize];
@@ -214,11 +352,111 @@ fn label(parent: &AnyObject, r: f64) -> Retained<AnyObject> {
     }
 }
 
+fn symbol(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "PUNCH" => "hand.raised.fill",
+        "FIRE" | "SHOOT" => "target",
+        "ATTACK" => "bolt.fill",
+        "THROW" => "arrow.up.right.circle.fill",
+        "AIM" => "scope",
+        "RELOAD" => "arrow.triangle.2.circlepath",
+        "JUMP" => "chevron.up.2",
+        "ENTER" => "car.fill",
+        "EXIT" => "rectangle.portrait.and.arrow.right",
+        "WEAPON" => "circle.hexagongrid.fill",
+        "COVER" => "shield.fill",
+        "CROUCH" => "chevron.down.2",
+        "CAM" => "eye.fill",
+        "PAUSE" => "pause.fill",
+        "PHONE" => "iphone",
+        "MENU\nKEYS" => "keyboard",
+        "SWITCH" => "person.2.fill",
+        "MODS" => "wrench.and.screwdriver.fill",
+        "GAS" | "THRUST" => "arrow.up",
+        "BRAKE" | "SLOW" | "REVERSE" => "arrow.down",
+        "H.BRAKE" => "parkingsign",
+        "HORN" => "speaker.wave.3.fill",
+        "DUCK" => "arrow.down.to.line",
+        "LOOK\nBACK" => "arrow.uturn.backward",
+        "LIGHTS" => "lightbulb.fill",
+        "RADIO" => "music.note",
+        "UP" | "RISE" => "arrow.up.to.line",
+        "DOWN" | "DIVE" => "arrow.down.to.line",
+        "YAW\nLEFT" => "arrow.counterclockwise",
+        "YAW\nRIGHT" => "arrow.clockwise",
+        "GEAR" => "chevron.down.circle",
+        "PEDAL" => "bicycle",
+        "SPRINT" => "hare.fill",
+        "HOP" => "arrow.up.forward",
+        "DROP\nCAR" | "DROP\nTRAILER" | "DROP\nLOAD" => "link.badge.minus",
+        "LOWER\nROPE" => "arrow.down.circle",
+        "VTOL" => "airplane",
+        "ROOF" => "sun.max.fill",
+        "OK" => "checkmark",
+        "BACK" => "arrow.uturn.left",
+        "ACTION" => "hand.point.up.left.fill",
+        "ABILITY" => "sparkles",
+        _ => return None,
+    })
+}
+
+fn icon_view(parent: &AnyObject, r: f64) -> Retained<AnyObject> {
+    unsafe {
+        let v: Retained<AnyObject> = msg_send![class!(UIImageView), new];
+        let _: () = msg_send![&*v, setFrame: rect(0.0, 0.0, 2.0 * r, 2.0 * r)];
+        let _: () = msg_send![&*v, setUserInteractionEnabled: false];
+        let _: () = msg_send![&*v, setContentMode: 4isize];
+        let _: () = msg_send![&*v, setTintColor: &*color(1.0, 0.95)];
+        let _: () = msg_send![parent, addSubview: &*v];
+        v
+    }
+}
+
+fn set_content(b: &Btn, text: &str) {
+    let image: Option<Retained<AnyObject>> = symbol(text).and_then(|name| unsafe {
+        let config: Retained<AnyObject> = msg_send![class!(UIImageSymbolConfiguration), configurationWithPointSize: (b.radius * 0.8).clamp(12.0, 30.0), weight: 6isize];
+        msg_send![class!(UIImage), systemImageNamed: &*NSString::from_str(name), withConfiguration: &*config]
+    });
+    let d = 2.0 * b.radius;
+    unsafe {
+        let _: () = msg_send![&*b.icon, setImage: image.as_deref().map_or(std::ptr::null(), |i| i as *const AnyObject)];
+        let (frame, size, lines) = if image.is_some() {
+            let _: () = msg_send![&*b.icon, setFrame: rect(0.0, d * 0.06, d, d * 0.6)];
+            (rect(3.0, d * 0.64, d - 6.0, d * 0.24), (b.radius * 0.3).clamp(7.0, 10.0), 1isize)
+        } else {
+            (rect(2.0, 0.0, d - 4.0, d), (b.radius * 0.42).clamp(9.0, 15.0), 2isize)
+        };
+        let _: () = msg_send![&*b.label, setFrame: frame];
+        let font: Retained<AnyObject> = msg_send![class!(UIFont), boldSystemFontOfSize: size];
+        let _: () = msg_send![&*b.label, setFont: &*font];
+        let _: () = msg_send![&*b.label, setNumberOfLines: lines];
+    }
+    set_hidden(&b.icon, image.is_none());
+    set_text(&b.label, &if image.is_some() { text.replace('\n', " ") } else { text.to_string() });
+}
+
 fn set_text(l: &AnyObject, text: &str) {
     unsafe { let _: () = msg_send![l, setText: &*NSString::from_str(text)]; }
 }
 fn set_hidden(v: &AnyObject, hidden: bool) {
     unsafe { let _: () = msg_send![v, setHidden: hidden]; }
+}
+fn style_button(v: &AnyObject, label: &AnyObject, icon: &AnyObject, state: u8) {
+    let (bg, ring, text) = match state {
+        2 => (color(1.0, 0.85), 1.0, 0.0),
+        1 => (color(1.0, 0.35), 0.9, 1.0),
+        _ => (color(0.0, 0.38), 0.55, 1.0),
+    };
+    unsafe {
+        let _: () = msg_send![v, setBackgroundColor: &*bg];
+        let layer: *mut AnyObject = msg_send![v, layer];
+        let _: () = msg_send![layer, setBorderWidth: 1.5f64];
+        let ring = color(1.0, ring);
+        let cg: *mut std::ffi::c_void = msg_send![&*ring, CGColor];
+        let _: () = msg_send![layer, setBorderColor: cg];
+        let _: () = msg_send![label, setTextColor: &*color(text, 0.95)];
+        let _: () = msg_send![icon, setTintColor: &*color(text, 0.95)];
+    }
 }
 fn set_alpha_bg(v: &AnyObject, alpha: f64) {
     unsafe { let _: () = msg_send![v, setBackgroundColor: &*color(1.0, alpha)]; }
@@ -259,17 +497,19 @@ pub fn install(window: &Window) {
             let center = place(s.anchor);
             let view = circle(&root, center, s.radius, 1.0, 0.18);
             let label = label(&view, s.radius);
-            Btn { view, label, center, radius: s.radius }
+            let icon = icon_view(&view, s.radius);
+            Btn { view, label, icon, center, radius: s.radius }
         })
         .collect();
     let stick_home = (sx + 40.0 + STICK_RADIUS, sy + sh - 30.0 - STICK_RADIUS);
     let stick_base = circle(&root, stick_home, STICK_RADIUS, 1.0, 0.12);
     let stick_knob = circle(&root, stick_home, KNOB_RADIUS, 1.0, 0.3);
     let mut o = Overlay {
-        root, buttons, stick_base, stick_knob, stick_home, safe, scale,
+        root, buttons, stick_base, stick_knob, stick_home, safe, full: (full.width, full.height), scale,
         grips: HashMap::new(), held: HashSet::new(), since: HashMap::new(),
         mouse_since: [std::time::Instant::now(); 2], lingering: false, mouse: 0, aim_latched: false,
-        nav: false, in_car: false, hidden: false,
+        nav: false, in_car: false, mode: FOOT, ctx: 0, menu: false, hidden: false,
+        ctrl_since: HashMap::new(), injected: Vec::new(),
     };
     o.relabel();
     eprintln!("[touch] overlay ready ({:.0}x{:.0} pt, safe area {:.0},{:.0} {:.0}x{:.0})", full.width, full.height, sx, sy, sw, sh);
@@ -288,7 +528,8 @@ impl Overlay {
     fn spec_act(&self, idx: usize) -> Option<(&'static str, Act)> {
         let s = &BUTTONS[idx];
         if s.nav && !self.nav { return None; }
-        if self.in_car { s.in_car } else { s.on_foot }
+        if s.need & self.ctx != s.need || s.unless & self.ctx != 0 { return None; }
+        s.acts[self.mode]
     }
 
     fn relabel(&mut self) {
@@ -296,7 +537,7 @@ impl Overlay {
             let act = self.spec_act(i);
             let b = &self.buttons[i];
             set_hidden(&b.view, act.is_none());
-            if let Some((text, _)) = act { set_text(&b.label, text); }
+            if let Some((text, _)) = act { set_content(b, text); }
         }
         self.restyle();
     }
@@ -306,7 +547,7 @@ impl Overlay {
         for (i, b) in self.buttons.iter().enumerate() {
             let latched = self.aim_latched && matches!(self.spec_act(i), Some((_, AimToggle)))
                 || self.nav && matches!(self.spec_act(i), Some((_, NavToggle)));
-            set_alpha_bg(&b.view, if pressed.contains(&i) { 0.45 } else if latched { 0.35 } else { 0.18 });
+            style_button(&b.view, &b.label, &b.icon, if pressed.contains(&i) { 2 } else if latched { 1 } else { 0 });
         }
     }
 
@@ -323,6 +564,11 @@ impl Overlay {
         p.0 < sx + sw * 0.4 && p.1 > sy + 70.0
     }
 
+    fn cursor_to(&self, p: (f64, f64)) {
+        let (w, h) = input::size();
+        input::mouse_pos((p.0 / self.full.0 * w as f64) as i32, (p.1 / self.full.1 * h as f64) as i32);
+    }
+
     fn touch(&mut self, t: &Touch) {
         let p = (t.location.x / self.scale, t.location.y / self.scale);
         match t.phase {
@@ -333,8 +579,12 @@ impl Overlay {
                         Some(AimToggle) => self.aim_latched = !self.aim_latched,
                         Some(NavToggle) => { self.nav = !self.nav; self.relabel(); }
                         Some(KeyNav(_)) if !self.nav => { self.nav = true; self.relabel(); }
+                        Some(Req(r)) => crate::pad::request(r),
                         _ => {}
                     }
+                } else if self.menu {
+                    self.cursor_to(p);
+                    self.grips.insert(t.id, Grip::Cursor { since: std::time::Instant::now(), up: false });
                 } else if self.in_stick_zone(p) && !self.grips.values().any(|g| matches!(g, Grip::Stick { .. })) {
                     self.grips.insert(t.id, Grip::Stick { origin: p, at: p });
                 } else {
@@ -346,6 +596,7 @@ impl Overlay {
                 match self.grips.get_mut(&t.id) {
                     Some(Grip::Stick { at, .. }) => *at = p,
                     Some(Grip::Button { last, .. }) if wheel => *last = p,
+                    Some(Grip::Cursor { .. }) => self.cursor_to(p),
                     Some(Grip::Look { last }) | Some(Grip::Button { last, .. }) => {
                         let (dx, dy) = (p.0 - last.0, p.1 - last.1);
                         *last = p;
@@ -357,7 +608,10 @@ impl Overlay {
                     None => {}
                 }
             }
-            TouchPhase::Ended | TouchPhase::Cancelled => { self.grips.remove(&t.id); }
+            TouchPhase::Ended | TouchPhase::Cancelled => match self.grips.get_mut(&t.id) {
+                Some(Grip::Cursor { up, .. }) => *up = true,
+                _ => { self.grips.remove(&t.id); }
+            },
         }
         self.apply();
     }
@@ -367,6 +621,9 @@ impl Overlay {
         let mut mouse = if self.aim_latched && !self.in_car { 2u8 } else { 0 };
         let mut stick = None;
         let mut horn = false;
+        let mut inject: Vec<(i32, f32)> = Vec::new();
+        let mut clicking = false;
+        self.grips.retain(|_, g| !matches!(g, Grip::Cursor { since, up: true } if since.elapsed() >= CLICK_DELAY + MIN_HOLD));
         for g in self.grips.values() {
             match g {
                 Grip::Stick { origin, at } => stick = Some((*origin, *at)),
@@ -374,9 +631,14 @@ impl Overlay {
                     Some(Key(k)) | Some(KeyNav(k)) => { keys.insert(k); }
                     Some(Mouse(bit)) => mouse |= bit,
                     Some(Horn) => horn = true,
+                    Some(Ctrl(c, v)) => inject.push((c, v)),
                     _ => {}
                 },
                 Grip::Look { .. } => {}
+                Grip::Cursor { since, up } => {
+                    if since.elapsed() >= CLICK_DELAY { mouse |= 1; }
+                    clicking |= *up || since.elapsed() < CLICK_DELAY;
+                }
             }
         }
         if let Some((o, at)) = stick {
@@ -386,14 +648,26 @@ impl Overlay {
             dx *= k;
             dy *= k;
             let (nx, ny) = (dx / STICK_RADIUS, dy / STICK_RADIUS);
-            if nx < -0.35 { keys.insert("KeyA"); }
-            if nx > 0.35 { keys.insert("KeyD"); }
-            if self.in_car {
-                if ny < -0.6 { keys.insert("Numpad8"); }
-                if ny > 0.6 { keys.insert("Numpad2"); }
-            } else {
-                if ny < -0.35 { keys.insert("KeyW"); }
-                if ny > 0.35 { keys.insert("KeyS"); }
+            let dead = |v: f64| if v.abs() < 0.15 { 0.0 } else { v as f32 };
+            match self.mode {
+                FOOT => {
+                    if nx < -0.35 { keys.insert("KeyA"); }
+                    if nx > 0.35 { keys.insert("KeyD"); }
+                    if ny < -0.35 { keys.insert("KeyW"); }
+                    if ny > 0.35 { keys.insert("KeyS"); }
+                }
+                HELI | PLANE => {
+                    inject.push((VEH_FLY_ROLL_LR, dead(nx)));
+                    inject.push((VEH_FLY_PITCH_UD, dead(ny)));
+                }
+                SUB => {
+                    inject.push((VEH_SUB_TURN_LR, dead(nx)));
+                    inject.push((VEH_SUB_PITCH_UD, dead(ny)));
+                }
+                _ => {
+                    inject.push((VEH_MOVE_LR, dead(nx)));
+                    inject.push((VEH_MOVE_UD, dead(ny)));
+                }
             }
             let sprint = !self.in_car && len > STICK_RADIUS * SPRINT_REACH;
             if sprint { keys.insert("ShiftLeft"); }
@@ -408,7 +682,7 @@ impl Overlay {
         crate::pad::HORN_TOUCH.store(horn, std::sync::atomic::Ordering::Relaxed);
         let now = std::time::Instant::now();
         let young = |t: Option<&std::time::Instant>| t.is_some_and(|t| now - *t < MIN_HOLD);
-        self.lingering = false;
+        self.lingering = clicking;
         for k in self.held.clone() {
             if keys.contains(k) { continue; }
             if young(self.since.get(k)) { keys.insert(k); self.lingering = true; continue; }
@@ -432,6 +706,16 @@ impl Overlay {
             }
         }
         self.mouse = mouse;
+        for (c, v) in self.injected.clone() {
+            if v == 0.0 || inject.iter().any(|(k, _)| *k == c) { continue; }
+            let hold = if c == VEH_ROOF { ROOF_HOLD } else { MIN_HOLD };
+            if self.ctrl_since.get(&c).is_some_and(|t| now - *t < hold) { inject.push((c, v)); self.lingering = true; }
+        }
+        for (c, _) in &inject {
+            if !self.injected.iter().any(|(k, _)| k == c) { self.ctrl_since.insert(*c, now); }
+        }
+        *crate::pad::INJECT.lock().unwrap() = inject.clone();
+        self.injected = inject;
         self.restyle();
     }
 
@@ -455,6 +739,7 @@ pub fn refresh() -> bool {
         let mut guard = cell.borrow_mut();
         let Some(o) = guard.as_mut() else { return false };
         fps_tick(o);
+        stop_tick(o);
         if o.lingering { o.apply(); }
         let mut wheeling = false;
         for g in o.grips.values() {
@@ -480,11 +765,25 @@ pub fn refresh() -> bool {
             if hide { o.release_all(); }
             set_hidden(&o.root, hide);
         }
-        let in_car = crate::pad::IN_VEHICLE.load(std::sync::atomic::Ordering::Relaxed);
-        if in_car != o.in_car && !o.hidden {
+        let menu = crate::pad::in_menu();
+        if menu != o.menu && !o.hidden {
+            o.grips.retain(|_, g| matches!(g, Grip::Button { .. }));
+            o.menu = menu;
+            eprintln!("[touch] menu cursor {}", if menu { "on" } else { "off" });
+            o.apply();
+        }
+        let mode = (crate::pad::VEH_MODE.load(std::sync::atomic::Ordering::Relaxed) as usize).min(MODES - 1);
+        let ctx = crate::pad::CONTEXT.load(std::sync::atomic::Ordering::Relaxed);
+        if ctx != o.ctx && mode == o.mode && !o.hidden {
+            o.ctx = ctx;
+            o.relabel();
+        }
+        if mode != o.mode && !o.hidden {
+            o.ctx = ctx;
             o.grips.retain(|_, g| !matches!(g, Grip::Button { .. }));
-            o.in_car = in_car;
-            if in_car { o.aim_latched = false; }
+            o.mode = mode;
+            o.in_car = mode != FOOT;
+            if o.in_car { o.aim_latched = false; }
             o.apply();
             o.relabel();
         }

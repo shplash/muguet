@@ -6,13 +6,17 @@ mod audio;
 mod config;
 mod fs;
 mod gpu;
+mod heapcheck;
 mod host;
 mod input;
 mod import;
 mod io;
 #[cfg(target_os = "ios")]
 mod keyboard;
+#[cfg(target_os = "ios")]
+mod mouse;
 mod mp;
+mod opus;
 mod pad;
 #[cfg(feature = "jit")]
 mod patch;
@@ -61,6 +65,58 @@ pub fn footprint_mb() -> u64 {
     info[2 + 7] >> 20
 }
 
+pub fn heap_resident_mb() -> u64 {
+    let Some(rt) = RT.get() else { return 0 };
+    let (base, len) = mem_base_len(&rt.mem);
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as usize;
+    let start = (base as usize) & !(page - 1);
+    let len = len + (base as usize - start);
+    let mut vec = vec![0 as libc::c_char; len.div_ceil(page)];
+    if unsafe { libc::mincore(start as *const libc::c_void, len, vec.as_mut_ptr()) } != 0 {
+        return 0;
+    }
+    (vec.iter().filter(|&&v| v & 1 != 0).count() * page >> 20) as u64
+}
+
+pub fn compressed_mb() -> u64 {
+    extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(task: u32, flavor: i32, info: *mut u64, count: *mut u32) -> i32;
+    }
+    const TASK_VM_INFO: i32 = 22;
+    let mut info = [0u64; 64];
+    let mut count = 128u32;
+    if unsafe { task_info(mach_task_self(), TASK_VM_INFO, info.as_mut_ptr(), &mut count) } != 0 {
+        return 0;
+    }
+    info[15] >> 20
+}
+
+pub fn malloc_mb() -> u64 {
+    #[repr(C)]
+    struct Stats { blocks_in_use: u32, size_in_use: usize, max_size_in_use: usize, size_allocated: usize }
+    extern "C" {
+        fn malloc_zone_statistics(zone: *mut libc::c_void, stats: *mut Stats);
+    }
+    let mut s = Stats { blocks_in_use: 0, size_in_use: 0, max_size_in_use: 0, size_allocated: 0 };
+    unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut s) };
+    (s.size_in_use >> 20) as u64
+}
+
+pub fn gpu_allocated_mb() -> u64 {
+    #[link(name = "Metal", kind = "framework")]
+    extern "C" {
+        fn MTLCreateSystemDefaultDevice() -> *mut objc2::runtime::AnyObject;
+    }
+    static DEVICE: OnceLock<usize> = OnceLock::new();
+    let dev = *DEVICE.get_or_init(|| unsafe { MTLCreateSystemDefaultDevice() } as usize) as *mut objc2::runtime::AnyObject;
+    if dev.is_null() {
+        return 0;
+    }
+    let bytes: usize = unsafe { objc2::msg_send![&*dev, currentAllocatedSize] };
+    (bytes >> 20) as u64
+}
+
 pub fn set_interactive_qos() {
     set_qos(QOS_CLASS_USER_INTERACTIVE);
 }
@@ -103,6 +159,7 @@ fn raise_open_file_limit() {
 
 fn main() -> Result<()> {
     raise_open_file_limit();
+    heapcheck::start();
     let argv: Vec<String> = std::env::args().collect();
 
     if argv.get(1).map(String::as_str) == Some("--import") {
@@ -229,7 +286,10 @@ pub fn run_engine(rt: &Arc<Runtime>, args: Vec<String>) -> Result<()> {
             eprintln!("[host] main unwound with a live runtime; waiting on engine threads");
             loop { std::thread::park(); }
         }
-        Err(e) => eprintln!("[host] main trapped: {e:?}"),
+        Err(e) => {
+            eprintln!("[host] main trapped: {e:?}");
+            stopped();
+        }
     }
     Ok(())
 }
@@ -462,12 +522,20 @@ fn run_pthread(rt: &Arc<Runtime>, ptr: u64, start_routine: u64, arg: u64) -> Res
         Err(e) => {
             let name = read_thread_name(&rt.mem, ptr);
             eprintln!("[host] thread {name} trapped: {e:?}");
+            stopped();
             return Ok(());
         }
     };
     match call_export(&mut store, &inst, "_emscripten_thread_exit", &[Val::I64(result)]) {
         Err(e) if !host::take_unwind() => Err(e.into()),
         _ => Ok(()),
+    }
+}
+
+fn stopped() {
+    if !host::engine_stopped() || cfg!(target_os = "ios") { return; }
+    if let Some(reason) = host::stop_reason() {
+        alert("Muguet stopped", &format!("The game hit an error and can't continue:\n\n{reason}"));
     }
 }
 
@@ -554,6 +622,7 @@ pub fn write_bytes(mem: &SharedMemory, addr: u64, data: &[u8]) -> bool {
     let (base, len) = mem_base_len(mem);
     let a = addr as usize;
     if a + data.len() > len { return false; }
+    heapcheck::note(addr, data.len() as u64, "host write");
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), base.add(a), data.len()); }
     true
 }

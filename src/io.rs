@@ -90,6 +90,7 @@ fn serve_loop(mem: SharedMemory, table: u64) {
                         if (dst + len) as usize > mlen {
                             -1
                         } else {
+                            crate::heapcheck::note(dst, len, "file read");
                             let buf = unsafe { std::slice::from_raw_parts_mut(base.add(dst as usize), len as usize) };
                             match f.read_exact_at(buf, off) {
                                 Ok(()) => len as i64,

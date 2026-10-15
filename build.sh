@@ -113,11 +113,9 @@ if ! command -v brew >/dev/null; then
   eval "$(/opt/homebrew/bin/brew shellenv)"
 fi
 brew --version | head -1
-if [ "$PLATFORM" = 2 ]; then
-  for tool in xcodegen:xcodegen wasm-opt:binaryen; do
-    command -v "${tool%%:*}" >/dev/null || { bold "Installing ${tool##*:}"; brew install "${tool##*:}"; }
-  done
-fi
+for tool in cmake:cmake $([ "$PLATFORM" = 2 ] && echo xcodegen:xcodegen wasm-opt:binaryen); do
+  command -v "${tool%%:*}" >/dev/null || { bold "Installing ${tool##*:}"; brew install "${tool##*:}"; }
+done
 
 bold "Checking Rust"
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"

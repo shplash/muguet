@@ -165,11 +165,14 @@ fn settings(cfg_path: &Path) -> Vec<String> {
     if let Some(extra) = cfg.get("extra_args").and_then(|v| v.as_array()) {
         engine_args.extend(extra.iter().filter_map(|a| a.as_str().map(String::from)));
     }
-    fix_settings(num("texture_quality").map(|q| q as i64));
+    if cfg!(target_os = "ios") && !engine_args.iter().any(|a| a.to_ascii_lowercase().starts_with("-framequeuelimit")) {
+        engine_args.push("-FrameQueueLimit=3".into());
+    }
+    fix_settings(num("texture_quality").map(|q| q as i64), flag("no_msaa"));
     engine_args
 }
 
-fn fix_settings(texture_quality: Option<i64>) {
+fn fix_settings(texture_quality: Option<i64>, no_msaa: bool) {
     let path = support_dir().join("saves/userdata/Documents/Rockstar Games/GTA V/settings.xml");
     let Ok(xml) = std::fs::read_to_string(&path) else { return };
     let mut new = xml.clone();
@@ -187,6 +190,15 @@ fn fix_settings(texture_quality: Option<i64>) {
     }
     set("ShaderQuality", &|v| v.max(1));
     set("MSAA", &|v| if v > 4 { v.min(crate::gpu::max_msaa() as i64) } else { v });
+    if no_msaa {
+        for tag in ["MSAA", "MSAAFragments", "MSAAQuality", "ReflectionMSAA"] {
+            set(tag, &|_| 0);
+        }
+        if new.contains(r#"<TXAA_Enabled value="true" />"#) {
+            new = new.replace(r#"<TXAA_Enabled value="true" />"#, r#"<TXAA_Enabled value="false" />"#);
+            eprintln!("[config] TXAA_Enabled true -> false");
+        }
+    }
     if new != xml {
         let _ = std::fs::write(&path, new.as_bytes());
     }

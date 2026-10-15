@@ -13,6 +13,54 @@ pub static FOCUSED: AtomicBool = AtomicBool::new(true);
 
 pub static IN_VEHICLE: AtomicBool = AtomicBool::new(false);
 
+pub const MODE_FOOT: u8 = 0;
+pub const MODE_CAR: u8 = 1;
+pub const MODE_BIKE: u8 = 2;
+pub const MODE_HELI: u8 = 3;
+pub const MODE_PLANE: u8 = 4;
+pub const MODE_BOAT: u8 = 5;
+pub const MODE_SUB: u8 = 6;
+pub const MODE_BICYCLE: u8 = 7;
+pub const MODE_PASSENGER: u8 = 8;
+pub static VEH_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(MODE_FOOT);
+
+pub const CTX_TOWING: u32 = 1;
+pub const CTX_TRAILER: u32 = 2;
+pub const CTX_CARGOBOB: u32 = 4;
+pub const CTX_ROPE: u32 = 8;
+pub const CTX_CONVERTIBLE: u32 = 16;
+pub const CTX_VTOL: u32 = 32;
+pub const CTX_GUN: u32 = 64;
+pub const CTX_MELEE: u32 = 128;
+pub const CTX_THROWN: u32 = 256;
+pub static CONTEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub static INJECT: Mutex<Vec<(i32, f32)>> = Mutex::new(Vec::new());
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub enum Request {
+    DropTow,
+    DropTrailer,
+    Rope,
+}
+pub static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub fn request(r: Request) {
+    REQUESTS.lock().unwrap().push(r);
+}
+
+static MENU: AtomicBool = AtomicBool::new(false);
+static SCRIPT_TICK: Mutex<Option<Instant>> = Mutex::new(None);
+pub fn script_tick(menu: bool) {
+    MENU.store(menu, Ordering::Relaxed);
+    *SCRIPT_TICK.lock().unwrap() = Some(Instant::now());
+}
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub fn in_menu() -> bool {
+    MENU.load(Ordering::Relaxed) || SCRIPT_TICK.lock().unwrap().is_some_and(|t| t.elapsed() > Duration::from_millis(500))
+}
+
 pub static HORN_PAD: AtomicBool = AtomicBool::new(false);
 pub static HORN_TOUCH: AtomicBool = AtomicBool::new(false);
 pub fn horn_held() -> bool {
@@ -59,15 +107,26 @@ pub fn poll() -> bool {
     st.last = Instant::now();
 
     let in_car = IN_VEHICLE.load(Ordering::Relaxed);
+    let in_air = in_car && matches!(VEH_MODE.load(Ordering::Relaxed), MODE_HELI | MODE_PLANE);
     HORN_PAD.store(false, Ordering::Relaxed);
     let mut keys: HashSet<&'static str> = HashSet::new();
     let mut buttons = 0u8;
     unsafe {
         let ls = gp.leftThumbstick();
         let (lx, ly) = (ls.xAxis().value(), ls.yAxis().value());
-        if lx < -STICK_DEADZONE { keys.insert("KeyA"); }
-        if lx > STICK_DEADZONE { keys.insert("KeyD"); }
-        if in_car {
+        if in_air {
+            if lx < -STICK_DEADZONE { keys.insert("Numpad4"); }
+            if lx > STICK_DEADZONE { keys.insert("Numpad6"); }
+            if ly > STICK_DEADZONE { keys.insert("Numpad8"); }
+            if ly < -STICK_DEADZONE { keys.insert("Numpad2"); }
+            if down(&gp.leftShoulder()) { keys.insert("KeyA"); }
+            if down(&gp.rightShoulder()) { keys.insert("KeyD"); }
+            if gp.leftThumbstickButton().is_some_and(|b| down(&b)) { keys.insert("KeyG"); }
+            if gp.rightTrigger().value() > 0.2 { keys.insert("KeyW"); }
+            if gp.leftTrigger().value() > 0.2 { keys.insert("KeyS"); }
+        } else if in_car {
+            if lx < -STICK_DEADZONE { keys.insert("KeyA"); }
+            if lx > STICK_DEADZONE { keys.insert("KeyD"); }
             if ly > STICK_DEADZONE { keys.insert("Numpad8"); }
             if ly < -STICK_DEADZONE { keys.insert("Numpad2"); }
             if gp.rightTrigger().value() > 0.2 { keys.insert("KeyW"); }
@@ -76,6 +135,8 @@ pub fn poll() -> bool {
             HORN_PAD.store(gp.leftThumbstickButton().is_some_and(|b| down(&b)), Ordering::Relaxed);
             if down(&gp.buttonX()) { keys.insert("Space"); }
         } else {
+            if lx < -STICK_DEADZONE { keys.insert("KeyA"); }
+            if lx > STICK_DEADZONE { keys.insert("KeyD"); }
             if ly > STICK_DEADZONE { keys.insert("KeyW"); }
             if ly < -STICK_DEADZONE { keys.insert("KeyS"); }
             if gp.rightTrigger().value() > 0.2 { buttons |= 1; }
@@ -88,7 +149,7 @@ pub fn poll() -> bool {
         if down(&gp.buttonA()) { keys.insert("Enter"); }
         if down(&gp.buttonB()) { keys.insert("KeyR"); keys.insert("Backspace"); }
         if down(&gp.buttonY()) { keys.insert("KeyF"); }
-        if down(&gp.leftShoulder()) { keys.insert("Tab"); }
+        if down(&gp.leftShoulder()) && !in_air { keys.insert("Tab"); }
         if gp.rightThumbstickButton().is_some_and(|b| down(&b)) { keys.insert("KeyC"); }
         let dp = gp.dpad();
         if down(&dp.up()) { keys.insert("ArrowUp"); }

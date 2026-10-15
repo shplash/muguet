@@ -56,6 +56,9 @@ pub(crate) struct PassState<'scope, 'snatch_guard, 'cmd_enc> {
 
     pub(crate) dynamic_offset_count: usize,
 
+    pub(crate) merged_bind_groups: crate::FastHashSet<usize>,
+    pub(crate) inited_bind_groups: crate::FastHashSet<usize>,
+
     pub(crate) string_offset: usize,
 }
 
@@ -108,7 +111,7 @@ where
 
         bind_group.validate_dynamic_bindings(index, &state.temp_offsets)?;
 
-        if merge_bind_groups {
+        if merge_bind_groups && state.merged_bind_groups.insert(Arc::as_ptr(bind_group) as usize) {
             // Merge the bind group's resources into the tracker. We only do this
             // for render passes. For compute passes it is done per dispatch in
             // [`flush_bindings`].
@@ -147,6 +150,7 @@ pub(super) fn flush_bindings_helper(state: &mut PassState) -> Result<(), Destroy
     let pipeline_layout = state.binder.pipeline_layout.as_ref().unwrap();
 
     for (i, bind_group, dynamic_offsets) in entries {
+        if state.inited_bind_groups.insert(Arc::as_ptr(bind_group) as usize) {
         state.base.buffer_memory_init_actions.extend(
             bind_group.buffer_init_actions.iter().filter_map(|action| {
                 action
@@ -172,6 +176,7 @@ pub(super) fn flush_bindings_helper(state: &mut PassState) -> Result<(), Destroy
             .map(|tlas| crate::ray_tracing::AsAction::UseTlas(tlas.clone()));
 
         state.base.as_actions.extend(used_resource);
+        }
 
         let raw_bg = bind_group.try_raw(state.base.snatch_guard)?;
         unsafe {

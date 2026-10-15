@@ -2382,6 +2382,8 @@ pub(super) fn encode_render_pass(
 
                 temp_offsets: Vec::new(),
                 dynamic_offset_count: 0,
+                merged_bind_groups: Default::default(),
+                inited_bind_groups: Default::default(),
 
                 string_offset: 0,
             },

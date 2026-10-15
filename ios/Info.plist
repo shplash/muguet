@@ -10,6 +10,20 @@
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSRequiresIPhoneOS</key><true/>
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key><false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+      <key>UIWindowSceneSessionRoleApplication</key>
+      <array>
+        <dict>
+          <key>UISceneConfigurationName</key><string>Default Configuration</string>
+          <key>UISceneClassName</key><string>UIWindowScene</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
   <key>UILaunchScreen</key><dict><key>UIColorName</key><string></string></dict>
   <key>UIRequiresFullScreen</key><true/>
   <key>UIStatusBarHidden</key><true/>
@@ -20,6 +34,7 @@
   <key>UIFileSharingEnabled</key><true/>
   <key>LSSupportsOpeningDocumentsInPlace</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.action-games</string>
+  <key>UIApplicationSupportsIndirectInputEvents</key><true/>
   <key>GCSupportsGameMode</key><true/>
   <key>GCSupportsControllerUserInteraction</key><true/>
   <key>GCSupportedGameControllers</key>
